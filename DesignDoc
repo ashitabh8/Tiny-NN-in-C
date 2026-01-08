@@ -1,0 +1,181 @@
+
+Design Document: PyTorch-to-C Microcontroller Compiler
+1. Project Overview
+Goal: Build a modular compiler that converts PyTorch models (nn.Module) into standalone, dependency-free C code suitable for microcontrollers (Cortex-M, ESP32, etc.).
+
+Core Philosophy:
+
+Graph-First: Operate on an intermediate representation (IR) that is optimized for compilation, not execution.
+
+Rule-Based Quantization: Decouple model architecture from quantization logic. Quantization is applied via an external "Rules List" (inspired by QWIX/Jax), allowing flexible experimentation without changing model code.
+
+Embedded-Native: Final output must optimize for static memory allocation (no malloc in the final C code) using liveness analysis.
+
+2. Architecture
+The system follows a standard Frontend → Middle-end → Backend compiler flow.
+
+A. Frontend (Graph Capture)
+
+Input: Standard PyTorch nn.Module.
+
+Engine: torch.fx.
+
+Responsibility: Traces the python execution and extracts the computational graph.
+
+Key Feature: Relies on torch.fx to provide a topologically sorted graph automatically, eliminating the need for complex sorting algorithms in the compiler.
+
+B. Middle-end (Optimization & Quantization)
+
+Input: PyTorch FX Graph.
+
+Internal State: Custom "Lowered IR" (Double-linked graph: Inputs + Users).
+
+Passes:
+
+Lowering: Convert FX nodes to Custom IR nodes.
+
+Calibration: Run data through the graph to gather statistics (min/max).
+
+Rule Application: Match nodes against the "Quantization Rules List" and tag them.
+
+Liveness Analysis: Compute the life-span of every tensor for memory planning.
+
+C. Backend (Code Generation)
+
+Input: Optimized Custom IR.
+
+Output:
+
+model.c (Logic)
+
+weights.h (Serialized parameters)
+
+model.h (Interface)
+
+3. Implementation Roadmap
+We will execute this in 3 Distinct Phases. Each phase builds upon the previous one. Optimization (Phase 3) is strictly reserved for after the core logic is proven.
+
+Phase 1: The "Golden Path" (Float32 Baseline)
+
+Goal: Generate valid C code for a standard floating-point model to prove the pipeline works.
+
+Step 1.1: Intermediate Representation (IR) Design
+
+Define the IRNode and IRGraph structures.
+
+Constraint: Nodes must support double-linking (knowing both inputs and users) to support future optimizations.
+
+Step 1.2: The Lowering Pass
+
+Ingest the torch.fx graph.
+
+Crucial Detail: Iterate simply over graph.nodes. Since torch.fx guarantees topological order, we map nodes 1:1 to our IR without sorting logic.
+
+Extract weights and biases into a separate parameter registry.
+
+Step 1.3: Naive C Generation
+
+Create a "Printer" that loops through the IR.
+
+Map Ops (Add, Mul, Linear, ReLU) to basic C implementations.
+
+Memory Strategy: Use simple arrays or malloc for now (ignore RAM optimization).
+
+Step 1.4: Validation Framework
+
+Create a test harness that runs input X through PyTorch and the generated C code, comparing outputs.
+
+✅ Phase 1 Success Criteria:
+
+Input: A simple MLP with skip connections.
+
+Output: C code compiles with gcc.
+
+Verification: C output matches PyTorch output within floating-point tolerance (10 
+−5
+ ).
+
+Phase 2: The Quantization Engine
+
+Goal: Implement the "Rule-Based" system to support Static and Dynamic quantization.
+
+Step 2.1: The Calibration Pass
+
+Implement a "Observer" system. Run representative data through the Float32 graph.
+
+Annotate every IRNode with observed [min, max] values.
+
+Step 2.2: The Rule Matcher
+
+Implement the configuration parser.
+
+Input: A list of QuantTechnique objects (Regex pattern + Quant Type + Scheme).
+
+Logic: Iterate the graph. If a node name matches a rule's Regex, apply the quantization metadata (Set dtype=int8, calculate scale and zero_point from calibration data).
+
+Step 2.3: Operator Lowering
+
+Modify the C Generator to switch behavior based on node dtype.
+
+If dtype == int8: Emit calls to QuantizedAdd, QuantizedConv2D.
+
+If dtype == float: Emit calls to standard Ops.
+
+Insert Quantize and Dequantize nodes at boundaries where precision changes.
+
+✅ Phase 2 Success Criteria:
+
+Define a rule: pattern='.*linear.*', weight_qtype=int8.
+
+Result: Inspecting the graph shows Linear layers are int8, activations are int8, but skip connections (if unmatched) remain float.
+
+Verification: Accuracy of C code is within acceptable quantization loss limits vs PyTorch.
+
+Phase 3: Embedded Optimization (Liveness & Memory)
+
+Goal: Prepare for the microcontroller by removing heap usage and minimizing footprint.
+
+Step 3.1: Liveness Analysis Pass
+
+Iterate the graph to build a "Lifecycle Map".
+
+For every tensor, record:
+
+Birth: Index of the node that creates it.
+
+Death: Index of the last node that uses it (requires the users list from Step 1.1).
+
+Step 3.2: The "Arena" Allocator
+
+Simulate a single contiguous block of RAM (uint8_t arena[]).
+
+Algorithm: Greedy Best-Fit.
+
+Assign a static integer offset to every node.
+
+Reuse memory offsets of tensors that have "died."
+
+Step 3.3: Optimized C Generation
+
+Replace variable declarations with pointer arithmetic: float* output = (float*)(arena + NODE_OFFSET);.
+
+Generate a macro defining the strict MAX_ARENA_SIZE needed.
+
+✅ Phase 3 Success Criteria:
+
+Generated C code contains zero malloc calls.
+
+A report is generated: "Model Parameter Size: 50KB. Activation Arena Size: 12KB."
+
+Verification: Visualizing the memory arena shows buffers overlapping correctly (time-sharing).
+
+4. Testing Strategy
+We will maintain a "Golden Test Suite" of 3 models throughout development:
+
+TinyMLP: (Linear -> ReLU -> Linear). Tests basic flow.
+
+ResNet-Block: (Split -> Conv -> Add). Tests skip connections and topological traversing.
+
+Mixed-Net: (Conv -> Quantize -> Linear -> Float Output). Tests the Rule-Based quantization and datatype bridging.
+
+Each phase must pass all 3 models before moving to the next.
