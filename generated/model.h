@@ -7,7 +7,7 @@
 #include <stddef.h>
 
 // Input: x
-// Output: fc2
+// Output: softmax
 
 // Main model inference function
 void model_forward(const float* input, float* output);

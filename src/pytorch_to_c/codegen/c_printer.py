@@ -217,10 +217,10 @@ class CPrinter:
     
     def _calculate_buffer_sizes(self) -> Dict[str, int]:
         """
-        Calculate buffer sizes for each node.
+        Calculate buffer sizes for each node using inferred shapes.
         
         Returns:
-            Dictionary mapping node name to buffer size
+            Dictionary mapping node name to buffer size (total number of elements)
         """
         sizes = {}
         
@@ -228,23 +228,38 @@ class CPrinter:
             if node.op_type == 'input':
                 continue
             
-            # Estimate size based on operation type
+            # First priority: use inferred shape if available
+            if node.output_shape is not None:
+                # Calculate total number of elements from shape
+                import math
+                # Remove batch dimension (first dimension) if present
+                shape = node.output_shape
+                if len(shape) > 0 and shape[0] == 1:
+                    shape = shape[1:]  # Remove batch dimension
+                
+                if len(shape) > 0:
+                    size = math.prod(shape)
+                    sizes[node.name] = size
+                else:
+                    sizes[node.name] = 1  # Scalar
+                
+                continue
+            
+            # Fallback: Estimate size based on operation type and metadata
             if node.op_type == 'linear':
-                sizes[node.name] = node.metadata['out_features']
+                sizes[node.name] = node.metadata.get('out_features', 1024)
             elif node.op_type == 'conv2d':
-                # This is a simplified estimate - would need actual shape inference
-                sizes[node.name] = 1024  # Placeholder
-            elif node.op_type in ['relu', 'softmax']:
-                # Same size as input - need to infer from input node
+                # Estimate from metadata (this is less accurate than shape inference)
+                sizes[node.name] = 1024  # Fallback
+            elif node.op_type in ['relu', 'softmax', 'batchnorm']:
+                # Same size as input
                 if node.inputs:
                     input_size = sizes.get(node.inputs[0].name, 1024)
                     sizes[node.name] = input_size
                 else:
                     sizes[node.name] = 1024
-            elif node.op_type == 'batchnorm':
-                sizes[node.name] = 1024  # Placeholder
             else:
-                sizes[node.name] = 1024  # Default
+                sizes[node.name] = 1024  # Default fallback
         
         return sizes
     

@@ -1,10 +1,3 @@
-"""
-Example: Compiling a simple MLP to C code
-
-This example demonstrates how to use the PyTorch-to-C compiler
-to convert a simple Multi-Layer Perceptron to C code.
-"""
-
 import torch
 import torch.nn as nn
 import sys
@@ -15,20 +8,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.pytorch_to_c.compiler import compile_model
 
-
-class SimpleMLP(nn.Module):
-    """A simple 2-layer MLP for demonstration."""
+class MixedNet(nn.Module):
+    """
+    Mixed network: Conv -> ReLU -> Linear -> Softmax
+    Tests different operation types and datatype bridging (future quantization).
+    """
     
-    def __init__(self, input_size=784, hidden_size=128, output_size=10):
+    def __init__(self, input_channels=3, num_classes=10):
         super().__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.conv = nn.Conv2d(input_channels, 32, kernel_size=3, stride=2, padding=1)
         self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, output_size)
+        self.fc = nn.Linear(32 * 16 * 16, num_classes)
+        self.softmax = nn.Softmax(dim=1)
     
     def forward(self, x):
-        x = self.fc1(x)
+        # Input: [B, C, H, W]
+        x = self.conv(x)  # [B, 32, 16, 16]
         x = self.relu(x)
-        x = self.fc2(x)
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.fc(x)
+        x = self.softmax(x)
         return x
 
 
@@ -39,14 +38,14 @@ def main():
     print("=" * 60)
     print()
     
-    # Create a simple model
+    # Create a mixed network
     print("Creating model...")
-    model = SimpleMLP(input_size=784, hidden_size=128, output_size=10)
+    model = MixedNet(input_channels=3, num_classes=10)
     model.eval()
-    
+
     # Create example input
     print("Creating example input...")
-    example_input = torch.randn(1, 784)
+    example_input = torch.randn(1, 3, 32, 32)
     
     # Test the model in PyTorch
     print("\nRunning PyTorch inference...")
@@ -67,7 +66,7 @@ def main():
         output_dir=output_dir,
         verbose=True
     )
-    
+
     print("\n" + "=" * 60)
     print("Compilation Complete!")
     print("=" * 60)
@@ -76,20 +75,18 @@ def main():
     print("  - model.c    : Model implementation")
     print("  - weights.h  : Trained weights")
     print()
-
-
+    
     print("\nIR Graph:")
     print(ir_graph.print_graph())
     print()
-    
-    # Print IR graph summary
+
     print("IR Graph Summary:")
     print(f"  Nodes: {len(ir_graph.nodes)}")
     print(f"  Parameters: {len(ir_graph.parameters)}")
     print(f"  Inputs: {len(ir_graph.inputs)}")
     print(f"  Outputs: {len(ir_graph.outputs)}")
     print()
-    
+
     print("Node Types:")
     node_types = {}
     for node in ir_graph.nodes:
@@ -97,15 +94,11 @@ def main():
     for op_type, count in sorted(node_types.items()):
         print(f"  {op_type}: {count}")
     print()
-    
+
     print("Next steps:")
     print("  1. Review the generated C code in the 'generated/' directory")
-    print("  2. Integrate with your embedded project")
-    print("  3. Compile with your target toolchain")
-    print("  4. Call model_forward(input, output) to run inference")
-    print()
-
+    print("  2. Compile and run the C code")
+    print("  3. Verify the C code matches the PyTorch output")
 
 if __name__ == "__main__":
     main()
-

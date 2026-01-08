@@ -63,11 +63,15 @@ class PyTorchToCCompiler:
             self._log("\nFX Graph:")
             self._log(self.tracer.print_graph(fx_graph))
         
-        # Step 2: Lowering - Convert to IR
+        # Step 2: Lowering - Convert to IR with shape inference
         self._log("\n[2/3] Lowering FX graph to IR...")
-        ir_graph = self.lowering.lower_fx_graph(fx_graph)
+        ir_graph = self.lowering.lower_fx_graph(fx_graph, example_input)
         self._log(f"  ✓ Created {len(ir_graph.nodes)} IR nodes")
         self._log(f"  ✓ Extracted {len(ir_graph.parameters)} parameters")
+        
+        # Log shape information
+        nodes_with_shapes = sum(1 for node in ir_graph.nodes if node.output_shape is not None)
+        self._log(f"  ✓ Inferred shapes for {nodes_with_shapes}/{len(ir_graph.nodes)} nodes")
         
         if self.verbose:
             self._log("\nIR Graph:")

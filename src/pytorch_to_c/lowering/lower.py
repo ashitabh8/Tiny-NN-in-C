@@ -6,6 +6,7 @@ import torch
 import torch.fx as fx
 import numpy as np
 from typing import Dict, Any, Optional, Tuple
+import math
 
 from ..ir.node import IRNode
 from ..ir.graph import IRGraph
@@ -27,16 +28,19 @@ class Lowering:
         self.ir_graph = IRGraph()
         self.node_map: Dict[fx.Node, IRNode] = {}  # FX node -> IR node
         self.module_dict: Dict[str, torch.nn.Module] = {}
+        self.shape_map: Dict[fx.Node, Tuple[int, ...]] = {}  # FX node -> output shape
     
     def lower_fx_graph(
         self,
-        fx_graph_module: fx.GraphModule
+        fx_graph_module: fx.GraphModule,
+        example_input: Optional[torch.Tensor] = None
     ) -> IRGraph:
         """
-        Convert an FX graph to IR graph.
+        Convert an FX graph to IR graph with shape inference.
         
         Args:
             fx_graph_module: The traced FX GraphModule
+            example_input: Example input for shape inference (optional)
             
         Returns:
             IRGraph: The lowered IR graph
@@ -44,9 +48,17 @@ class Lowering:
         # Store module references for get_attr operations
         self.module_dict = dict(fx_graph_module.named_modules())
         
+        # Infer shapes if example input is provided
+        if example_input is not None:
+            self.shape_map = self._infer_shapes(fx_graph_module, example_input)
+        
         # torch.fx guarantees topological order, so we can iterate directly
         for fx_node in fx_graph_module.graph.nodes:
-            self._lower_node(fx_node, fx_graph_module)
+            ir_node = self._lower_node(fx_node, fx_graph_module)
+            
+            # Add shape information if available
+            if ir_node and fx_node in self.shape_map:
+                ir_node.output_shape = self.shape_map[fx_node]
         
         # Validate the IR graph
         self.ir_graph.validate()
@@ -366,18 +378,129 @@ class Lowering:
                         output_ir_node = self.node_map[item]
                         if output_ir_node is not None:
                             self.ir_graph.mark_output(output_ir_node)
+    
+    def _infer_shapes(
+        self,
+        fx_graph_module: fx.GraphModule,
+        example_input: torch.Tensor
+    ) -> Dict[fx.Node, Tuple[int, ...]]:
+        """
+        Infer output shapes for all nodes by running shape propagation.
+        
+        Args:
+            fx_graph_module: The FX graph module
+            example_input: Example input tensor
+            
+        Returns:
+            Dictionary mapping FX nodes to their output shapes
+        """
+        shape_map = {}
+        
+        try:
+            # Use torch.fx's ShapeProp for automatic shape propagation
+            from torch.fx.passes.shape_prop import ShapeProp
+            
+            ShapeProp(fx_graph_module).propagate(example_input)
+            
+            # Extract shapes from node metadata
+            for node in fx_graph_module.graph.nodes:
+                if hasattr(node, 'meta') and 'tensor_meta' in node.meta:
+                    # ShapeProp stores shape in tensor_meta
+                    tensor_meta = node.meta['tensor_meta']
+                    shape_map[node] = tuple(tensor_meta.shape)
+                elif hasattr(node, 'meta') and 'val' in node.meta:
+                    # Some nodes store actual tensor in 'val'
+                    val = node.meta['val']
+                    if hasattr(val, 'shape'):
+                        shape_map[node] = tuple(val.shape)
+        
+        except Exception as e:
+            # Fallback: manual shape inference if ShapeProp fails
+            print(f"Warning: ShapeProp failed ({e}), using manual shape inference")
+            shape_map = self._manual_shape_inference(fx_graph_module, example_input)
+        
+        return shape_map
+    
+    def _manual_shape_inference(
+        self,
+        fx_graph_module: fx.GraphModule,
+        example_input: torch.Tensor
+    ) -> Dict[fx.Node, Tuple[int, ...]]:
+        """
+        Manual shape inference by running actual forward pass.
+        
+        Args:
+            fx_graph_module: The FX graph module
+            example_input: Example input tensor
+            
+        Returns:
+            Dictionary mapping FX nodes to their output shapes
+        """
+        shape_map = {}
+        
+        # Run forward pass and track intermediate outputs
+        with torch.no_grad():
+            # Store intermediate values
+            def forward_hook(module, input, output):
+                # This will be called for each module
+                pass
+            
+            # Execute the graph node by node
+            env = {}
+            for node in fx_graph_module.graph.nodes:
+                if node.op == 'placeholder':
+                    env[node] = example_input
+                    shape_map[node] = tuple(example_input.shape)
+                
+                elif node.op == 'get_attr':
+                    # Parameter node - get its shape
+                    param = fx_graph_module.get_parameter(node.target)
+                    shape_map[node] = tuple(param.shape)
+                    env[node] = param
+                
+                elif node.op == 'call_module':
+                    # Get the module and run it
+                    module = fx_graph_module.get_submodule(node.target)
+                    input_val = env[node.args[0]] if node.args else None
+                    if input_val is not None:
+                        output = module(input_val)
+                        env[node] = output
+                        shape_map[node] = tuple(output.shape)
+                
+                elif node.op == 'call_function':
+                    # Call a function
+                    args = [env[arg] if isinstance(arg, fx.Node) else arg for arg in node.args]
+                    output = node.target(*args)
+                    env[node] = output
+                    if hasattr(output, 'shape'):
+                        shape_map[node] = tuple(output.shape)
+                
+                elif node.op == 'call_method':
+                    # Call a method on a tensor
+                    self_arg = env[node.args[0]]
+                    args = [env[arg] if isinstance(arg, fx.Node) else arg for arg in node.args[1:]]
+                    output = getattr(self_arg, node.target)(*args)
+                    env[node] = output
+                    if hasattr(output, 'shape'):
+                        shape_map[node] = tuple(output.shape)
+                    elif isinstance(output, int):
+                        # size() returns int, not a tensor
+                        shape_map[node] = (1,)  # Scalar
+        
+        return shape_map
 
 
-def lower_fx_graph(fx_graph_module: fx.GraphModule) -> IRGraph:
+def lower_fx_graph(fx_graph_module: fx.GraphModule, example_input: Optional[torch.Tensor] = None) -> IRGraph:
     """
     Convenience function to lower an FX graph to IR.
     
     Args:
         fx_graph_module: The traced FX GraphModule
+        example_input: Example input for shape inference (optional)
         
     Returns:
         The lowered IR graph
     """
     lowering = Lowering()
-    return lowering.lower_fx_graph(fx_graph_module)
+    return lowering.lower_fx_graph(fx_graph_module, example_input)
 
