@@ -1,0 +1,149 @@
+% ============================================================================
+% SECTION 4: RUNNING THE FULL TEST SUITE
+% ============================================================================
+
+\section{Testing \& Results}
+
+% ----------------------------------------------------------------------------
+% Slide 4.1: Test Commands Summary
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Test Commands Summary}
+\begin{lstlisting}[style=bashstyle]
+# All tests (64 tests)
+python -m pytest test/ -v
+
+# Float model tests
+python -m pytest test/test_integration.py -v -s
+
+# Quantization unit tests
+python -m pytest test/test_quantization.py -v -s
+
+# Quantization end-to-end tests
+python -m pytest test/test_quantization_e2e.py -v -s
+
+# Optimization pass tests
+python -m pytest test/test_passes.py -v -s
+\end{lstlisting}
+
+Commands for commit 9362ae0
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 4.2: Key Numerical Checks
+% ----------------------------------------------------------------------------
+\begin{frame}{Key Numerical Checks}
+    \centering
+    \begin{tabular}{lcc}
+        \toprule
+        \textbf{Test} & \textbf{Max Error} & \textbf{Test File} \\
+        \midrule
+        \uncover<2->{Float MLP} & \uncover<2->{$\sim 10^{-6}$} & \uncover<2->{\texttt{test\_integration.py}} \\
+        \uncover<3->{Float ResNet} & \uncover<3->{$1.19 \times 10^{-7}$} & \uncover<3->{\texttt{test\_quantization\_e2e.py}} \\
+        \uncover<4->{Static int8} & \uncover<4->{$\sim$1--2\%} & \uncover<4->{\texttt{test\_quantization\_e2e.py}} \\
+        \uncover<5->{Static int16} & \uncover<5->{$\sim$0.1\%} & \uncover<5->{\texttt{test\_quantization\_e2e.py}} \\
+        \uncover<6->{FusePass} & \uncover<6->{\textbf{0.00e+00}} & \uncover<6->{\texttt{test\_passes.py}} \\
+        \bottomrule
+    \end{tabular}
+    
+    \vspace{1em}
+    
+    \uncover<7->{
+        \begin{alertblock}{FusePass is Bit-Identical!}
+            When scales match, the optimization produces exactly the same numerical results.
+        \end{alertblock}
+    }
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 4.3: File Structure
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Project File Structure}
+\begin{lstlisting}[style=diagramstyle,basicstyle=\ttfamily\tiny\color{codefg}]
+src/
+  pytorch_to_c/
+    compiler.py              # Main entry point
+    frontend/fx_tracer.py    # torch.fx tracing
+    lowering/lower.py        # FX -> IR conversion
+    ir/
+      node.py                # IRNode base class
+      graph.py               # IRGraph
+      quant_node.py          # QuantIRNode base
+    codegen/c_printer.py     # C code generation
+    quantization/
+      rules.py               # QuantRule, StaticQuantRule, etc.
+      graph_transform.py     # QuantizationTransform
+      ops/                   # Quantized operation implementations
+  passes/
+    base.py                  # IRPass base class
+    fuse_dequant_quant.py    # FuseDequantQuantPass
+  c_ops/
+    nn_ops_float.h           # Float C kernels
+    nn_ops_int8.h            # Int8 C kernels
+    nn_ops_int16.h           # Int16 C kernels
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 4.4: Summary
+% ----------------------------------------------------------------------------
+\begin{frame}{Summary}
+    \textbf{What we built:}
+    \begin{itemize}[<+->]
+        \item PyTorch $\rightarrow$ C compiler with torch.fx frontend
+        \item Clean IR with doubly-linked node graph
+        \item Independent from source rule-based quantization 
+        \item Support for int8 and int16
+        \item Mixed precision quantization
+        \item Optimization pass infrastructure
+        \item FuseDequantQuantPass (bit-identical results!)
+    \end{itemize}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 4.5: Extensibility Points
+% ----------------------------------------------------------------------------
+\begin{frame}{Extensibility Points}
+    \textbf{How to extend the compiler:}
+    
+    \vspace{1em}
+    
+    \begin{columns}
+    \begin{column}{0.5\textwidth}
+        \textbf{Add new quantization:}
+        \begin{itemize}
+            \item New \texttt{QuantRule} subclass
+            \item New \texttt{QuantIRNode} implementation
+        \end{itemize}
+        
+        \vspace{1em}
+        
+        \textbf{Add new optimization:}
+        \begin{itemize}
+            \item New \texttt{IRPass} subclass
+            \item Add to pass pipeline
+        \end{itemize}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+        \textbf{Add new operations:}
+        \begin{itemize}
+            \item Add to lowering rules
+            \item Add C kernel implementation
+        \end{itemize}
+        
+        \vspace{1em}
+        
+        \textbf{Add new datatypes:}
+        \begin{itemize}
+            \item Extend \texttt{get\_c\_dtype()}
+            \item Add C kernels for dtype
+        \end{itemize}
+    \end{column}
+    \end{columns}
+    
+    \vspace{1em}
+    
+    \centering
+    \textbf{Run all 64 tests:} \texttt{python -m pytest test/ -v}
+\end{frame}
+
+

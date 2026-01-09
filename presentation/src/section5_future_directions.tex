@@ -1,0 +1,182 @@
+% ============================================================================
+% SECTION 5: FUTURE DIRECTIONS
+% ============================================================================
+
+\section{Future Directions}
+
+% ----------------------------------------------------------------------------
+% Slide 5.1: Overview
+% ----------------------------------------------------------------------------
+\begin{frame}{Future Directions}
+    \textbf{Extending the compiler for adaptive runtime behavior:}
+    
+    \vspace{1em}
+    
+    \begin{enumerate}[<+->]
+        \item \textbf{Resource-Aware Precision Switching}
+        
+        Dynamically switch between quantization precisions at runtime
+        
+        \vspace{0.5em}
+        
+        \item \textbf{Adaptive Operation Implementations}
+        
+        Choose optimal op implementations based on system state
+        
+        \vspace{0.5em}
+        
+        \item \textbf{User-Defined Switching Metrics}
+        
+        Custom policies for runtime adaptation decisions
+    \end{enumerate}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 5.2: Resource-Aware Precision Switching
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Resource-Aware Precision Switching}
+    \textbf{Goal:} Enable runtime precision switching based on available resources
+    
+    \vspace{0.5em}
+    
+\onslide<1->
+    \textbf{Concept:}
+    \begin{itemize}
+        \item Compile model with multiple precision paths (int8, int16, float32)
+        \item Switch between precisions based on battery, thermal, latency constraints
+    \end{itemize}
+
+\onslide<2->
+    \vspace{0.5em}
+    \textbf{Example API:}
+\begin{lstlisting}[style=pythonstyle]
+compile_model(
+    model, 
+    multi_precision=True,
+    precision_options=['int8', 'int16', 'float32'],
+    switching_policy='battery_aware'
+)
+\end{lstlisting}
+
+\onslide<3->
+    \vspace{0.5em}
+    \textbf{Generated C code:}
+\begin{lstlisting}[style=cstyle]
+if (battery_level < 20) {
+    model_forward_int8(input, output);  // Fastest, lowest power
+} else if (accuracy_required > 0.95) {
+    model_forward_float32(input, output);  // Highest accuracy
+} else {
+    model_forward_int16(input, output);  // Balanced
+}
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 5.3: Adaptive Operation Implementations
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Adaptive Operation Implementations}
+    \textbf{Goal:} Switch between operation implementations based on system state
+    
+    \vspace{0.5em}
+    
+\onslide<1->
+    \textbf{Use cases:}
+    \begin{itemize}
+        \item Multi-threaded vs. single-threaded based on CPU availability
+        \item SIMD-optimized vs. scalar based on processor features
+        \item Memory-optimized vs. speed-optimized based on RAM pressure
+    \end{itemize}
+
+\onslide<2->
+    \vspace{0.5em}
+    \textbf{Example: Threading strategy}
+\begin{lstlisting}[style=cstyle]
+void dense_adaptive(float* input, int size, float* weight, 
+                    float* output, runtime_context_t* ctx) {
+    if (ctx->cpu_cores_available > 2 && size > 1024) {
+        dense_multithreaded(input, size, weight, output, ctx);
+    } else {
+        dense_singlethreaded(input, size, weight, output);
+    }
+}
+\end{lstlisting}
+
+\onslide<3->
+    \vspace{0.5em}
+    \textbf{Compiler directive:}
+\begin{lstlisting}[style=pythonstyle]
+@adaptive_implementation(variants=['single', 'multi', 'simd'])
+def forward(self, x):
+    return self.fc(x)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 5.4: User-Defined Switching Metrics
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{User-Defined Switching Metrics}
+    \textbf{Goal:} Allow users to define custom policies for runtime adaptation
+    
+    \vspace{0.5em}
+    
+\onslide<1->
+    \textbf{Custom metric system:}
+\begin{lstlisting}[style=pythonstyle]
+class CustomSwitchingPolicy:
+    def should_switch_precision(self, layer_name, current_metrics):
+        latency = current_metrics['latency']
+        accuracy = current_metrics['accuracy']
+        
+        if layer_name.startswith('critical_'):
+            return 'float32' if accuracy < 0.99 else 'int16'
+        
+        return 'int8' if latency > 50 else 'int16'
+    
+    def should_switch_implementation(self, op_name, system_state):
+        if system_state['temperature'] > 70:
+            return 'low_power'
+        return 'high_performance'
+\end{lstlisting}
+
+\onslide<2->
+    \vspace{0.5em}
+    \textbf{Register policy:}
+\begin{lstlisting}[style=pythonstyle]
+compile_model(model, switching_policy=CustomSwitchingPolicy())
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 5.5: Benefits and Challenges
+% ----------------------------------------------------------------------------
+\begin{frame}{Benefits and Challenges}
+    \begin{columns}
+    \begin{column}{0.5\textwidth}
+        \textbf{Benefits:}
+        \begin{itemize}[<+->]
+            \item \textbf{Adaptability:} Model adapts to runtime conditions
+            \item \textbf{Efficiency:} Optimal resource usage
+            \item \textbf{Flexibility:} User-defined policies
+            \item \textbf{Performance:} Balance speed vs. accuracy
+        \end{itemize}
+    \end{column}
+    \begin{column}{0.5\textwidth}
+        \textbf{Challenges:}
+        \begin{itemize}[<+->]
+            \item Code size increases (multiple implementations)
+            \item Runtime overhead for decision logic
+            \item Complexity in debugging/testing
+            \item Policy design requires domain knowledge
+        \end{itemize}
+    \end{column}
+    \end{columns}
+    
+    \vspace{1em}
+    
+    % \uncover<9->{
+    %     \begin{block}{Research Opportunity}
+    %         Finding optimal trade-offs between adaptability and overhead remains an open research question.
+    %     \end{block}
+    % }
+\end{frame}

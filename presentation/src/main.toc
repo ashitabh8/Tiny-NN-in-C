@@ -1,0 +1,6 @@
+\beamer@sectionintoc {1}{Introduction \& Motivation}{3}{0}{1}
+\beamer@sectionintoc {2}{Tutorial \& Use Cases}{33}{0}{2}
+\beamer@sectionintoc {3}{Inner Workings}{66}{0}{3}
+\beamer@sectionintoc {4}{Writing Optimization Passes}{80}{0}{4}
+\beamer@sectionintoc {5}{Testing \& Results}{86}{0}{5}
+\beamer@sectionintoc {6}{Future Directions}{103}{0}{6}

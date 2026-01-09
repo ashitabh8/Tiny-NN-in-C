@@ -1,0 +1,176 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+
+% Theme and colors - Standard academic style
+\usetheme{Madrid}
+\usecolortheme{default}
+
+% Custom colors for slides
+\definecolor{deepblue}{rgb}{0,0.2,0.6}
+\definecolor{deepred}{rgb}{0.6,0,0}
+\definecolor{deepgreen}{rgb}{0,0.5,0}
+
+% VS Code Dark+ inspired color scheme for code
+\definecolor{codebg}{HTML}{1E1E1E}
+\definecolor{codefg}{HTML}{D4D4D4}
+\definecolor{codekeyword}{HTML}{569CD6}
+\definecolor{codestring}{HTML}{CE9178}
+\definecolor{codecomment}{HTML}{6A9955}
+\definecolor{codenumber}{HTML}{B5CEA8}
+\definecolor{codefunction}{HTML}{DCDCAA}
+\definecolor{codeparam}{HTML}{9CDCFE}
+\definecolor{codeoperator}{HTML}{D4D4D4}
+\definecolor{codetype}{HTML}{4EC9B0}
+\definecolor{codedecorator}{HTML}{C586C0}
+\definecolor{codeframe}{HTML}{3C3C3C}
+
+% Packages
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{pifont}  % For checkmarks and crosses
+\usepackage{fancyvrb}
+
+% Try to use fontspec if available (requires XeLaTeX/LuaLaTeX)
+\usepackage{iftex}
+\ifxetex
+    \usepackage{fontspec}
+    \setmonofont{JetBrains Mono}[Scale=0.85]
+\else\ifluatex
+    \usepackage{fontspec}
+    \setmonofont{JetBrains Mono}[Scale=0.85]
+\else
+    % pdfLaTeX fallback
+    \usepackage[T1]{fontenc}
+    \usepackage{inconsolata}
+\fi\fi
+
+% Code listing styles - VS Code Dark+ theme
+\lstdefinestyle{pythonstyle}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\scriptsize\color{codefg},
+    keywordstyle=\color{codekeyword}\bfseries,
+    keywordstyle=[2]\color{codefunction},
+    keywordstyle=[3]\color{codetype},
+    stringstyle=\color{codestring},
+    commentstyle=\color{codecomment}\itshape,
+    numberstyle=\tiny\color{codenumber},
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=none,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=4,
+    frame=none,
+    xleftmargin=5pt,
+    xrightmargin=5pt,
+    language=Python,
+    morekeywords={self,True,False,None,as,with,yield,async,await},
+    morekeywords=[2]{compile_model,QuantizationTransform,StaticQuantRule,CPrinter,DynamicQuantRuleMinMaxPerTensor,FuseDequantQuantPass,apply,generate_all,randn,relu,mean,forward,__init__},
+    morekeywords=[3]{nn,torch,Module,Linear,Conv2d,BatchNorm2d,ReLU},
+    texcl=false,
+    mathescape=false,
+    literate={->}{{\textcolor{codeoperator}{->}}}2
+             {=}{{\textcolor{codeoperator}{=}}}1
+}
+
+\lstdefinestyle{cstyle}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\scriptsize\color{codefg},
+    keywordstyle=\color{codekeyword}\bfseries,
+    keywordstyle=[2]\color{codefunction},
+    stringstyle=\color{codestring},
+    commentstyle=\color{codecomment}\itshape,
+    numberstyle=\tiny\color{codenumber},
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=none,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=4,
+    frame=none,
+    xleftmargin=5pt,
+    xrightmargin=5pt,
+    language=C,
+    morekeywords=[2]{compute_dynamic_scale_int8,quantize_float_to_int8}
+}
+
+\lstdefinestyle{bashstyle}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\scriptsize\color{codefg},
+    keywordstyle=\color{codekeyword}\bfseries,
+    commentstyle=\color{codecomment}\itshape,
+    breaklines=true,
+    frame=none,
+    xleftmargin=5pt,
+    xrightmargin=5pt,
+    language=bash,
+    morekeywords={python,pytest,src,examples,out}
+}
+
+\lstdefinestyle{diagramstyle}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\scriptsize\color{codefg},
+    breaklines=false,
+    frame=none,
+    xleftmargin=5pt,
+    xrightmargin=5pt
+}
+
+\lstset{style=pythonstyle}
+
+% Presentation info
+\title[PyTorch-to-Quantized-C Compiler]{PyTorch-to-Quantized-C Compiler}
+\subtitle{Compiling Neural Networks for Microcontrollers}
+\author{Ashitabh Misra, Joydeep Bhattacharyya, Tarek Abdelzaher}
+\institute{}
+\date{\today}
+
+% Navigation symbols
+\setbeamertemplate{navigation symbols}{}
+
+% Frame numbering
+\setbeamertemplate{footline}{
+    \leavevmode%
+    \hbox{%
+    \begin{beamercolorbox}[wd=0.5\paperwidth,ht=2.25ex,dp=1ex,left]{section in head/foot}%
+        \usebeamerfont{section in head/foot}\hspace*{2ex}\insertsectionhead
+    \end{beamercolorbox}%
+    \begin{beamercolorbox}[wd=0.5\paperwidth,ht=2.25ex,dp=1ex,right]{page number in head/foot}%
+        \usebeamerfont{page number in head/foot}\insertframenumber{} / \inserttotalframenumber\hspace*{2ex}
+    \end{beamercolorbox}}%
+    \vskip0pt%
+}
+
+\begin{document}
+
+% Title slide
+\begin{frame}
+    \titlepage
+\end{frame}
+
+% Table of contents
+\begin{frame}{Outline}
+    \tableofcontents
+\end{frame}
+
+% Include sections
+\input{section0_introduction}
+\input{section1_tutorial}
+\input{section2_inner_workings}
+\input{section3_optimization_passes}
+\input{section4_testing}
+\input{section5_future_directions}
+\input{section6_conclusion}
+
+\end{document}
+

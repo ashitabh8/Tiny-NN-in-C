@@ -8,18 +8,13 @@
 
 ### Slide 0.1: The Problem
 
-**Deploying neural networks on microcontrollers is hard:**
+**Deploying quantized neural networks on microcontrollers is very challenging:**
 
-- Limited memory (KB, not GB)
-- No Python runtime
-- No GPU
-- Need C/C++ code
-- Quantization essential for memory/speed
 
-**Existing tools have friction:**
-- TFLite Micro: Requires TensorFlow, has runtime overhead
-- Glow: Complex setup, research-oriented
-- ONNX Runtime: Heavy dependency, not MCU-focused
+**Existing tools are inflexible and difficult to extend:**
+- TFLite Micro: Requires TensorFlow, has runtime overhead, difficult to modify or extend to new quantization techniques
+- Glow: Complex setup, designed for research not real-world embedded use, hard to add new features
+- ONNX Runtime: Heavy dependency, not MCU-focused, extension and customization are complicated
 
 ---
 
@@ -41,44 +36,9 @@
 
 *Glow development has slowed; PyTorch support via ONNX conversion
 
----
 
-### Slide 0.3: When to Use Tiny-NN-in-C
 
-**✓ USE THIS WHEN:**
-- You work in PyTorch and want direct C generation
-- You need human-readable C code (auditing, certification)
-- You want fine-grained control over quantization per-layer
-- You need minimal binary footprint (no runtime)
-- You want to extend/customize the compiler
-- Educational purposes / understanding how compilers work
 
-**✗ USE TFLITE MICRO WHEN:**
-- You already have TensorFlow models
-- You need production-tested, battle-hardened code
-- You need the full TFLite operator coverage
-- You want Google's support ecosystem
-
-**✗ USE GLOW WHEN:**
-- You need maximum optimization (LLVM backend)
-- You're targeting specific accelerators
-- You have resources for complex setup
-
----
-
-### Slide 0.4: Key Advantages Detailed
-
-| Advantage | Why It Matters |
-|-----------|----------------|
-| **No Runtime** | Generated C is self-contained. Just compile and run. No interpreter overhead. |
-| **PyTorch Native** | No model conversion. Use `torch.fx` directly on your PyTorch model. |
-| **Readable Output** | You can inspect `model.c`. Great for debugging, auditing, certification. |
-| **Rule-Based Quantization** | `pattern=r'.*encoder.*'` - quantize by name regex. Mix int8/int16/float32. |
-| **IR-Based Architecture** | Clean IR enables optimization passes (like FuseDequantQuant). |
-| **Extensible** | Add new ops: ~50 lines of Python + C kernel. No rebuilding compiler. |
-| **Lightweight** | The compiler is pure Python. Output is just `.c` and `.h` files. |
-
----
 
 ### Slide 0.5: Architecture Comparison
 
@@ -252,8 +212,10 @@ rules = [
     # Encoder: aggressive int8
     StaticQuantRule(pattern=r'.*encoder.*', dtype='int8', ...),
     
-    # Output: higher precision int16  
-    StaticQuantRule(pattern=r'.*output.*', dtype='int16', ...),
+    DynamicQuantRuleMinMaxPerTensor(
+        pattern=r'.*output.*',
+        dtype='int8'
+    )
     
     # precision_layer: NO RULE → stays float32
 ]

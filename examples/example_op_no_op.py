@@ -113,15 +113,6 @@ def main():
     printer_before.generate_all("tmp/generated_unoptimized")
     print("\n📁 Generated unoptimized code: tmp/generated_unoptimized/")
     
-    # Show the pattern we're looking for
-    print("\n🔍 Looking for fusable dequant→quant pairs:")
-    for i, node in enumerate(quant_ir_unopt.nodes):
-        if node.op_type == 'dequantize' and i + 1 < len(quant_ir_unopt.nodes):
-            next_node = quant_ir_unopt.nodes[i + 1]
-            if next_node.op_type == 'quantize':
-                scale_match = "✓ SAME" if node.scale == next_node.scale else "✗ DIFFERENT"
-                print(f"   {node.name} (scale={node.scale}) → {next_node.name} (scale={next_node.scale})")
-                print(f"      Scales: {scale_match}")
     
     # Now create optimized version
     ir_graph_opt = compile_model(model, example_input, return_ir=True, verbose=False)

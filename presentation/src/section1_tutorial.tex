@@ -1,0 +1,445 @@
+% ============================================================================
+% SECTION 1: TUTORIAL & USE CASES
+% ============================================================================
+
+\section{Tutorial \& Use Cases}
+
+% ----------------------------------------------------------------------------
+% Slide 1.0: Quick Start - The Core API
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Quick Start: The Core API}
+    \textbf{Three simple steps to compile a quantized model:}
+    \vspace{0.5em}
+
+\onslide<1->
+    \textbf{Step 1: Compile to C (float)}
+\begin{lstlisting}[style=pythonstyle]
+from src.pytorch_to_c.compiler import compile_model
+
+ir_graph = compile_model(model, example_input, output_dir="out/")
+\end{lstlisting}
+
+\onslide<2->
+    \vspace{0.5em}
+    \textbf{Step 2: Define quantization rules}
+\begin{lstlisting}[style=pythonstyle]
+from src.pytorch_to_c.quantization import StaticQuantRule
+
+rules = [StaticQuantRule(pattern=r'fc.*', dtype='int8', ...)]
+\end{lstlisting}
+
+\onslide<3->
+    \vspace{0.5em}
+    \textbf{Step 3: Apply quantization and generate}
+\begin{lstlisting}[style=pythonstyle]
+transform = QuantizationTransform(rules)
+quant_ir = transform.apply(ir_graph)
+CPrinter(quant_ir).generate_all("out/")
+\end{lstlisting}
+
+\end{frame}
+
+% \begin{onlyenv}<4>
+%     \textbf{Complete workflow:}
+% \begin{lstlisting}[style=pythonstyle]
+% ir_graph = compile_model(model, example_input, return_ir=True)
+% rules = [StaticQuantRule(pattern=r'fc.*', dtype='int8', ...)]
+% quant_ir = QuantizationTransform(rules).apply(ir_graph)
+% CPrinter(quant_ir).generate_all("out/")
+% \end{lstlisting}
+% \end{onlyenv}
+% \end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.1: What is This?
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{What is This?}
+    \textbf{A PyTorch-to-C compiler for microcontrollers}
+    
+    \vspace{0.5em}
+    
+    \begin{itemize}[<+->]
+        \item Takes PyTorch models $\rightarrow$ Generates standalone C code
+        \item Supports quantization (int8, int16) for embedded deployment
+        \item Extensible rule-based system for selective quantization
+        \item IR-based architecture enables optimization passes
+    \end{itemize}
+    
+    \vspace{1em}
+    
+\begin{uncoverenv}<5->
+\begin{lstlisting}[style=bashstyle]
+python examples/tiny_resnet.py
+\end{lstlisting}
+\end{uncoverenv}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.2a: Simple MLP Example - Init
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Simple MLP Example}
+    \textbf{Model:} 2-layer MLP (Linear $\rightarrow$ ReLU $\rightarrow$ Linear)
+    
+\begin{lstlisting}[style=pythonstyle]
+class SimpleMLP(nn.Module):
+    def __init__(self, input_size=784, hidden_size=128, output_size=10):
+        super().__init__()
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.2b: Simple MLP Example - Layers
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Simple MLP Example}
+    \textbf{Model:} 2-layer MLP (Linear $\rightarrow$ ReLU $\rightarrow$ Linear)
+    
+\begin{lstlisting}[style=pythonstyle]
+class SimpleMLP(nn.Module):
+    def __init__(self, input_size=784, hidden_size=128, output_size=10):
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, output_size)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.2c: Simple MLP Example - Forward
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Simple MLP Example}
+    \textbf{Model:} 2-layer MLP (Linear $\rightarrow$ ReLU $\rightarrow$ Linear)
+    
+\begin{lstlisting}[style=pythonstyle]
+class SimpleMLP(nn.Module):
+    def __init__(self, input_size=784, hidden_size=128, output_size=10):
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, output_size)
+    
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.2d: Simple MLP Example - Compile
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Simple MLP Example}
+    \textbf{Compile to C:}
+    
+\begin{lstlisting}[style=pythonstyle]
+model = SimpleMLP(input_size=784, hidden_size=128, output_size=10)
+example_input = torch.randn(1, 784)
+
+ir_graph = compile_model(
+    model=model,
+    example_input=example_input,
+    output_dir="generated"
+)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.2e: Simple MLP Example - Generated IR
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Simple MLP Example: Generated IR Graph}
+    \textbf{IR Graph structure:}
+    
+\begin{lstlisting}[style=diagramstyle]
+IRGraph:
+  Inputs: ['x']
+  Outputs: ['fc2']
+  Parameters: ['fc1_weight', 'fc1_bias', 'fc2_weight', 'fc2_bias']
+  Nodes:
+    x [input]
+      inputs: []
+      users: [fc1]
+      shape: (1, 784), dtype: float32
+    fc1 [linear]
+      inputs: [x]
+      users: [relu]
+      shape: (1, 128), dtype: float32
+    relu [relu]
+      inputs: [fc1]
+      users: [fc2]
+      shape: (1, 128), dtype: float32
+    fc2 [linear]
+      inputs: [relu]
+      users: []
+      shape: (1, 10), dtype: float32
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.3a: ResNet-Style Model - Block Init
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{ResNet-Style Model (Skip Connections)}
+    \textbf{Architecture:} Conv $\rightarrow$ BatchNorm $\rightarrow$ ReLU $\rightarrow$ Skip $\rightarrow$ Pool $\rightarrow$ FC
+    
+\begin{lstlisting}[style=pythonstyle]
+class ResNetBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.3b: ResNet-Style Model - Block Forward
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{ResNet-Style Model (Skip Connections)}
+    \textbf{Architecture:} Conv $\rightarrow$ BatchNorm $\rightarrow$ ReLU $\rightarrow$ Skip $\rightarrow$ Pool $\rightarrow$ FC
+    
+\begin{lstlisting}[style=pythonstyle]
+class ResNetBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+    
+    def forward(self, x):
+        identity = x
+        out = torch.relu(self.bn1(self.conv1(x)))
+        return out + identity
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.3c: ResNet-Style Model - Full Model
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{ResNet-Style Model (Skip Connections)}
+    \textbf{TinyResNet:} Using ResNetBlock with skip connections
+    
+\begin{lstlisting}[style=pythonstyle]
+class TinyResNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv_init = nn.Conv2d(3, 32, 3, padding=1)
+        self.block1 = ResNetBlock(32)
+        self.fc = nn.Linear(32, 10)
+    
+    def forward(self, x):
+        x = torch.relu(self.conv_init(x))
+        x = self.block1(x)
+        x = x.mean(dim=[2, 3])
+        return self.fc(x)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.4a: Static Quantization - Define Rule
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Static Quantization}
+    \textbf{Key idea:} Scales are known at compile time (from calibration)
+    
+    \vspace{0.5em}
+    \textbf{Step 1: Define quantization rules}
+    
+\begin{lstlisting}[style=pythonstyle]
+from src.pytorch_to_c.quantization import StaticQuantRule
+
+rules = [
+    StaticQuantRule(
+        pattern=r'fc.*',
+        dtype='int8',
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.4b: Static Quantization - Complete Rule
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Static Quantization}
+    \textbf{Key idea:} Scales are known at compile time (from calibration)
+    
+    \vspace{0.5em}
+    \textbf{Step 1: Define quantization rules}
+    
+\begin{lstlisting}[style=pythonstyle]
+from src.pytorch_to_c.quantization import StaticQuantRule
+
+rules = [
+    StaticQuantRule(
+        pattern=r'fc.*',
+        dtype='int8',
+        input_scale=0.01, weight_scale=0.01, output_scale=0.01
+    )
+]
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.4c: Static Quantization - Apply
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Static Quantization}
+    \textbf{Key idea:} Scales are known at compile time (from calibration)
+    
+    \vspace{0.5em}
+    \textbf{Step 2: Apply to IR graph}
+    
+\begin{lstlisting}[style=pythonstyle]
+ir_graph = compile_model(model, example_input, return_ir=True)
+transform = QuantizationTransform(rules)
+quant_ir = transform.apply(ir_graph)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.5a: Dynamic Quantization - Rule
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Dynamic Quantization}
+    \textbf{Key idea:} Input scale computed at runtime from actual data
+    
+    \vspace{0.5em}
+    \textbf{Define dynamic rule (no calibration needed!):}
+    
+\begin{lstlisting}[style=pythonstyle]
+from src.pytorch_to_c.quantization import DynamicQuantRuleMinMaxPerTensor
+
+rules = [
+    DynamicQuantRuleMinMaxPerTensor(
+        pattern=r'fc.*',
+        dtype='int8'
+    )
+]
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.5b: Dynamic Quantization - Generated C
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Dynamic Quantization}
+    \textbf{Key idea:} Input scale computed at runtime from actual data
+    
+    \vspace{0.5em}
+    \textbf{Generated C code computes scale dynamically:}
+    
+\begin{lstlisting}[style=cstyle]
+float scale = compute_dynamic_scale_int8(input, 784);
+quantize_float_to_int8(input, 784, scale, 0, buf_quantized);
+\end{lstlisting}
+
+    \vspace{1em}
+    
+    \begin{block}{Advantage}
+        No calibration dataset required---scales derived from weight statistics.
+    \end{block}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.6a: Mixed Precision - Encoder
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Mixed Precision Quantization}
+    \textbf{Selective quantization:} Different rules for different layers
+    
+\begin{lstlisting}[style=pythonstyle]
+rules = [
+    StaticQuantRule(pattern=r'.*encoder.*', dtype='int8', ...),
+]
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.6b: Mixed Precision - Encoder + Output
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Mixed Precision Quantization}
+    \textbf{Selective quantization:} Different rules for different layers
+    
+\begin{lstlisting}[style=pythonstyle]
+rules = [
+    StaticQuantRule(pattern=r'.*encoder.*', dtype='int8', ...),
+    
+    StaticQuantRule(pattern=r'.*output.*', dtype='int16', ...),
+]
+\end{lstlisting}
+    
+\end{frame}
+
+
+% ----------------------------------------------------------------------------
+% Slide 1.7: Quantization Results
+% ----------------------------------------------------------------------------
+\begin{frame}{Correctness Results (On TinyResNet model)}
+    
+    \textbf{Comparing our implementation with Pytorch Float32 model.}
+    \centering
+    \begin{tabular}{lcc}
+        \toprule
+        \textbf{Configuration} & \textbf{Max Error} & \textbf{Memory Savings} \\
+        \midrule
+        \uncover<2->{Float32 (baseline)} & \uncover<2->{$1.19 \times 10^{-7}$} & \uncover<2->{---} \\
+        \uncover<3->{Static int16} & \uncover<3->{0.07\%} & \uncover<3->{2$\times$} \\
+        \uncover<4->{Static int8} & \uncover<4->{1.63\%} & \uncover<4->{4$\times$} \\
+        \uncover<5->{Dynamic int8} & \uncover<5->{2.95\%} & \uncover<5->{4$\times$} \\
+        \bottomrule
+    \end{tabular}
+    
+    \vspace{1em}
+    
+    \uncover<6->{
+        \begin{block}{Takeaway}
+            Choose precision based on your accuracy requirements and memory constraints.
+        \end{block}
+    }
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.8a: FuseDequantQuant - Before
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Optimization Pass: FuseDequantQuant}
+    \textbf{Problem:} Consecutive quantized layers have redundant conversions
+    
+\begin{lstlisting}[style=diagramstyle]
+BEFORE: fc1(int8) -> dequant(float) -> quant(int8) -> fc2(int8)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.8b: FuseDequantQuant - After
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Optimization Pass: FuseDequantQuant}
+    \textbf{Problem:} Consecutive quantized layers have redundant conversions
+    
+\begin{lstlisting}[style=diagramstyle]
+BEFORE: fc1(int8) -> dequant(float) -> quant(int8) -> fc2(int8)
+AFTER:  fc1(int8) -> fc2(int8)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.8c: FuseDequantQuant - Code
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Optimization Pass: FuseDequantQuant}
+    \textbf{Apply the optimization pass:}
+    
+\begin{lstlisting}[style=pythonstyle]
+from src.passes import FuseDequantQuantPass
+
+fuse_pass = FuseDequantQuantPass()
+optimized_ir = fuse_pass.apply(quant_ir)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 1.8d: FuseDequantQuant - Result
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Optimization Pass: FuseDequantQuant}
+    \textbf{Apply the optimization pass:}
+    
+\begin{lstlisting}[style=pythonstyle]
+from src.passes import FuseDequantQuantPass
+
+fuse_pass = FuseDequantQuantPass()
+optimized_ir = fuse_pass.apply(quant_ir)
+\end{lstlisting}
+
+    \vspace{0.5em}
+    
+    \begin{alertblock}{Result}
+        When scales match, fusion is \textbf{bit-identical}: Max error = \texttt{0.00e+00}
+    \end{alertblock}
+\end{frame}

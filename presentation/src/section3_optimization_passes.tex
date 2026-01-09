@@ -1,0 +1,161 @@
+% ============================================================================
+% SECTION 3: WRITING OPTIMIZATION PASSES
+% ============================================================================
+
+\section{Writing Optimization Passes}
+
+% ----------------------------------------------------------------------------
+% Slide 3.1: Pass Infrastructure
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Pass Infrastructure}
+    \textbf{Base class:} \texttt{src/passes/base.py}
+    
+\begin{lstlisting}[style=pythonstyle]
+class IRPass(ABC):
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
+        self.stats = {}  # Track optimization statistics
+    
+    @abstractmethod
+    def apply(self, ir_graph: IRGraph) -> IRGraph:
+        """Transform the IR graph"""
+        pass
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Return statistics about optimizations applied"""
+        return self.stats
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 3.2: FuseDequantQuantPass Implementation
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{FuseDequantQuantPass Implementation}
+    \textbf{File:} \texttt{src/passes/fuse\_dequant\_quant.py}
+    
+\begin{onlyenv}<1>
+\begin{lstlisting}[style=pythonstyle]
+class FuseDequantQuantPass(IRPass):
+    def apply(self, ir_graph: IRGraph) -> IRGraph:
+        # 1. Find fusable pairs
+        pairs = self._find_fusable_pairs(ir_graph)
+        
+        # 2. Fuse each pair
+        for dequant, quant in reversed(pairs):
+            self._fuse_pair(ir_graph, dequant, quant)
+        
+        return ir_graph
+\end{lstlisting}
+\end{onlyenv}
+
+\begin{onlyenv}<2>
+\begin{lstlisting}[style=pythonstyle]
+    def _find_fusable_pairs(self, ir_graph):
+        pairs = []
+        for node in ir_graph.nodes:
+            if isinstance(node, DequantizeNode):
+                if len(node.users) == 1:
+                    user = node.users[0]
+                    if isinstance(user, QuantizeNode):
+                        # Check: same dtype AND same scale
+                        if (node.inputs[0].dtype == user.dtype and
+                            self._scales_match(node, user)):
+                            pairs.append((node, user))
+        return pairs
+\end{lstlisting}
+\end{onlyenv}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 3.3: Graph Rewiring in Passes
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Graph Rewiring in Passes}
+    \textbf{Before fusion:}
+\begin{lstlisting}[style=diagramstyle]
+A -> dequant -> quant -> B
+\end{lstlisting}
+
+    \textbf{After fusion:}
+\begin{lstlisting}[style=diagramstyle]
+A -> B
+\end{lstlisting}
+
+    \vspace{0.5em}
+    \textbf{Rewiring code:}
+\begin{lstlisting}[style=pythonstyle]
+def _fuse_pair(self, ir_graph, dequant_node, quant_node):
+    source = dequant_node.inputs[0]
+    targets = quant_node.users.copy()
+    
+    # Rewire: source -> targets
+    source.users.remove(dequant_node)
+    for target in targets:
+        target.inputs = [source if x == quant_node else x 
+                         for x in target.inputs]
+        source.users.append(target)
+    
+    # Remove nodes from graph
+    ir_graph.nodes.remove(dequant_node)
+    ir_graph.nodes.remove(quant_node)
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 3.4: Writing Your Own Pass
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Writing Your Own Pass}
+    \textbf{Example: Dead Code Elimination Pass}
+    
+\begin{lstlisting}[style=pythonstyle]
+class DeadCodeEliminationPass(IRPass):
+    """Remove nodes whose outputs are never used"""
+    
+    def apply(self, ir_graph: IRGraph) -> IRGraph:
+        changed = True
+        while changed:
+            changed = False
+            for node in ir_graph.nodes.copy():
+                # Skip output nodes
+                if node in ir_graph.outputs:
+                    continue
+                # Skip input nodes
+                if node in ir_graph.inputs:
+                    continue
+                # If no users, node is dead
+                if len(node.users) == 0:
+                    self._remove_node(ir_graph, node)
+                    changed = True
+        return ir_graph
+\end{lstlisting}
+\end{frame}
+
+% ----------------------------------------------------------------------------
+% Slide 3.5: Pass Composition
+% ----------------------------------------------------------------------------
+\begin{frame}[fragile]{Pass Composition}
+    \textbf{Chain multiple passes:}
+    
+\begin{lstlisting}[style=pythonstyle]
+from src.passes import FuseDequantQuantPass
+
+# Apply quantization
+transform = QuantizationTransform(rules)
+quant_ir = transform.apply(ir_graph)
+
+# Apply optimization passes
+passes = [
+    FuseDequantQuantPass(verbose=True),
+    # DeadCodeEliminationPass(),
+    # ConstantFoldingPass(),
+]
+
+optimized_ir = quant_ir
+for p in passes:
+    optimized_ir = p.apply(optimized_ir)
+    print(f"{p.__class__.__name__}: {p.get_stats()}")
+
+# Generate final C code
+CPrinter(optimized_ir).generate_all("output/")
+\end{lstlisting}
+\end{frame}
+

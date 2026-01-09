@@ -1,0 +1,30 @@
+\frametitle{User-Defined Switching Metrics}
+\textbf{Goal:} Allow users to define custom policies for runtime adaptation
+
+    \vspace{0.5em}
+
+\onslide<1->
+    \textbf{Custom metric system:}
+\begin{lstlisting}[style=pythonstyle]
+class CustomSwitchingPolicy:
+    def should_switch_precision(self, layer_name, current_metrics):
+        latency = current_metrics['latency']
+        accuracy = current_metrics['accuracy']
+
+        if layer_name.startswith('critical_'):
+            return 'float32' if accuracy < 0.99 else 'int16'
+
+        return 'int8' if latency > 50 else 'int16'
+
+    def should_switch_implementation(self, op_name, system_state):
+        if system_state['temperature'] > 70:
+            return 'low_power'
+        return 'high_performance'
+\end{lstlisting}
+
+\onslide<2->
+    \vspace{0.5em}
+    \textbf{Register policy:}
+\begin{lstlisting}[style=pythonstyle]
+compile_model(model, switching_policy=CustomSwitchingPolicy())
+\end{lstlisting}
