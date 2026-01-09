@@ -59,7 +59,7 @@ def main():
     print("Compiling to C...")
     print("=" * 60)
     
-    output_dir = "generated"
+    output_dir = "tmp/generated_mixed_net"
     ir_graph = compile_model(
         model=model,
         example_input=example_input,
@@ -94,11 +94,6 @@ def main():
     for op_type, count in sorted(node_types.items()):
         print(f"  {op_type}: {count}")
     print()
-
-    print("Next steps:")
-    print("  1. Review the generated C code in the 'generated/' directory")
-    print("  2. Compile and run the C code")
-    print("  3. Verify the C code matches the PyTorch output")
 
 if __name__ == "__main__":
     main()

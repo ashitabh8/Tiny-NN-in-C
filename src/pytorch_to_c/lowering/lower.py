@@ -341,14 +341,19 @@ class Lowering:
         return ir_node
     
     def _lower_call_method(self, fx_node: fx.Node) -> IRNode:
-        """Lower a method call (e.g., tensor.view, tensor.flatten)."""
+        """Lower a method call (e.g., tensor.view, tensor.flatten, tensor.mean)."""
         method_name = fx_node.target
         
+        # Capture both positional args (after self) and keyword args
         ir_node = IRNode(
             name=fx_node.name,
             op_type=f'method_{method_name}',
             dtype='float32',
-            metadata={'method_name': method_name, 'args': fx_node.args[1:]}
+            metadata={
+                'method_name': method_name,
+                'args': fx_node.args[1:],  # Skip 'self' arg
+                'kwargs': dict(fx_node.kwargs) if fx_node.kwargs else {}
+            }
         )
         
         # Add input dependencies (first arg is self)

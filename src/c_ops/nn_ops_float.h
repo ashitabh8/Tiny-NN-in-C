@@ -116,6 +116,33 @@ static inline void softmax(float* x, int n) {
     for (int i = 0; i < n; ++i) x[i] *= inv;
 }
 
+// Mean reduction over spatial dimensions (H, W) for NHWC
+// Used for global average pooling or mean(dim=[2,3]) in PyTorch
+// in:  [H, W, C] - 3D tensor in NHWC format (batch dimension removed)
+// out: [C] - 1D tensor with channel means
+// This is equivalent to global_average_pool_2d but named for clarity
+static inline void mean_hwc(const float* in, int h, int w, int c, float* out) {
+    const int n = h * w;
+    // Initialize output to zero
+    for (int ch = 0; ch < c; ++ch) {
+        out[ch] = 0.0f;
+    }
+    // Sum over all spatial positions
+    for (int ih = 0; ih < h; ++ih) {
+        for (int iw = 0; iw < w; ++iw) {
+            const float* px = in + ((ih * w + iw) * c);
+            for (int ch = 0; ch < c; ++ch) {
+                out[ch] += px[ch];
+            }
+        }
+    }
+    // Divide by number of elements
+    const float inv = n > 0 ? 1.0f / (float)n : 0.0f;
+    for (int ch = 0; ch < c; ++ch) {
+        out[ch] *= inv;
+    }
+}
+
 // BatchNorm2D for NHWC
 // in:  [H, W, C]
 // gamma: [C] (scale)

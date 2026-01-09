@@ -4,11 +4,17 @@ A modular compiler that converts PyTorch models (nn.Module) into standalone, dep
 
 ## Project Status
 
-**Phase 1: Float32 Baseline** - ✅ Implemented
+**Phase 1: Float32 Baseline** - ✅ **COMPLETED**
+- Full compilation pipeline working
+- Shape inference implemented
+- PyTorch vs C output comparison tests passing
+- Self-contained C output
 
-This phase establishes the core compilation pipeline with floating-point operations.
-
-**Phase 2: Quantization Engine** - 📝 Planned (see [quantization/README.md](quantization/README.md))
+**Phase 2: Quantization Engine** - 📝 **IN DESIGN**
+- Comprehensive design documents completed
+- See [DESIGN_DOCS_INDEX.md](DESIGN_DOCS_INDEX.md) for all design docs
+- Ready for implementation pending final design decisions
+- Original plan: [quantization/README.md](quantization/README.md) (to be updated)
 
 **Phase 3: Embedded Optimization** - 📝 Planned
 
@@ -43,6 +49,23 @@ pip install -r requirements.txt
 # Install package in development mode
 pip install -e .
 ```
+
+## Phase 2 Design Documentation
+
+Comprehensive design documents for the **Quantization Engine** (Phase 2) are now available:
+
+- **[DESIGN_DOCS_INDEX.md](DESIGN_DOCS_INDEX.md)** - Start here! Navigation guide to all design docs
+- **[QUANTIZATION_DESIGN.md](QUANTIZATION_DESIGN.md)** - Complete technical specification
+- **[QUANTIZATION_ARCHITECTURE.md](QUANTIZATION_ARCHITECTURE.md)** - Visual architecture guide
+- **[QUANTIZATION_DESIGN_SUMMARY.md](QUANTIZATION_DESIGN_SUMMARY.md)** - Executive summary
+- **[PHASE1_VS_PHASE2.md](PHASE1_VS_PHASE2.md)** - What changes from Phase 1 to Phase 2
+- **[DESIGN_DECISIONS_NEEDED.md](DESIGN_DECISIONS_NEEDED.md)** - Open questions to resolve
+
+**Key Design Principles:**
+- ✅ **Modular**: Logic in rules/nodes, not in c_printer
+- ✅ **Extensible**: Easy to add new quantization strategies
+- ✅ **User Control**: Users provide scale/offset (no calibration in compiler)
+- ✅ **Backward Compatible**: Phase 1 code continues to work
 
 ## Quick Start
 

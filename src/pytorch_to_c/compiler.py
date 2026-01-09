@@ -37,7 +37,8 @@ class PyTorchToCCompiler:
         self,
         model: torch.nn.Module,
         example_input: torch.Tensor,
-        output_dir: str = "generated"
+        output_dir: Optional[str] = "generated",
+        return_ir_only: bool = False
     ) -> IRGraph:
         """
         Compile a PyTorch model to C code.
@@ -45,41 +46,53 @@ class PyTorchToCCompiler:
         Args:
             model: The PyTorch nn.Module to compile
             example_input: An example input tensor for tracing
-            output_dir: Directory to write generated C files to
+            output_dir: Directory to write generated C files to (None to skip)
+            return_ir_only: If True, only return IR (skip code generation)
             
         Returns:
             The IR graph (for inspection/debugging)
         """
-        self._log("=" * 60)
-        self._log("PyTorch to C Compiler - Phase 1")
-        self._log("=" * 60)
+        if not return_ir_only:
+            self._log("=" * 60)
+            self._log("PyTorch to C Compiler - Phase 1")
+            self._log("=" * 60)
         
         # Step 1: Frontend - Trace with torch.fx
-        self._log("\n[1/3] Tracing model with torch.fx...")
+        if not return_ir_only:
+            self._log("\n[1/3] Tracing model with torch.fx...")
         fx_graph = self.tracer.trace_model(model, example_input)
-        self._log(f"  ✓ Traced {len(list(fx_graph.graph.nodes))} nodes")
+        if not return_ir_only:
+            self._log(f"  ✓ Traced {len(list(fx_graph.graph.nodes))} nodes")
         
-        if self.verbose:
+        if self.verbose and not return_ir_only:
             self._log("\nFX Graph:")
             self._log(self.tracer.print_graph(fx_graph))
         
         # Step 2: Lowering - Convert to IR with shape inference
-        self._log("\n[2/3] Lowering FX graph to IR...")
+        if not return_ir_only:
+            self._log("\n[2/3] Lowering FX graph to IR...")
         ir_graph = self.lowering.lower_fx_graph(fx_graph, example_input)
-        self._log(f"  ✓ Created {len(ir_graph.nodes)} IR nodes")
-        self._log(f"  ✓ Extracted {len(ir_graph.parameters)} parameters")
+        if not return_ir_only:
+            self._log(f"  ✓ Created {len(ir_graph.nodes)} IR nodes")
+            self._log(f"  ✓ Extracted {len(ir_graph.parameters)} parameters")
         
         # Log shape information
         nodes_with_shapes = sum(1 for node in ir_graph.nodes if node.output_shape is not None)
-        self._log(f"  ✓ Inferred shapes for {nodes_with_shapes}/{len(ir_graph.nodes)} nodes")
+        if not return_ir_only:
+            self._log(f"  ✓ Inferred shapes for {nodes_with_shapes}/{len(ir_graph.nodes)} nodes")
         
-        if self.verbose:
+        if self.verbose and not return_ir_only:
             self._log("\nIR Graph:")
             self._log(ir_graph.print_graph())
         
         # Validate IR graph
         ir_graph.validate()
-        self._log("  ✓ IR graph validated")
+        if not return_ir_only:
+            self._log("  ✓ IR graph validated")
+        
+        # If return_ir_only, skip code generation
+        if return_ir_only or output_dir is None:
+            return ir_graph
         
         # Step 3: Code Generation
         self._log("\n[3/3] Generating C code...")
@@ -113,8 +126,9 @@ class PyTorchToCCompiler:
 def compile_model(
     model: torch.nn.Module,
     example_input: torch.Tensor,
-    output_dir: str = "generated",
-    verbose: bool = True
+    output_dir: Optional[str] = "generated",
+    verbose: bool = True,
+    return_ir: bool = False
 ) -> IRGraph:
     """
     Convenience function to compile a PyTorch model to C.
@@ -122,8 +136,9 @@ def compile_model(
     Args:
         model: The PyTorch nn.Module to compile
         example_input: An example input tensor for tracing
-        output_dir: Directory to write generated C files to
+        output_dir: Directory to write generated C files to (None to skip)
         verbose: If True, print compilation progress
+        return_ir: If True, only return IR graph (skip code generation)
         
     Returns:
         The IR graph
@@ -132,7 +147,10 @@ def compile_model(
         >>> model = MyModel()
         >>> example_input = torch.randn(1, 3, 32, 32)
         >>> ir_graph = compile_model(model, example_input, "output")
+        
+        # Get IR only (for quantization)
+        >>> ir_graph = compile_model(model, example_input, return_ir=True)
     """
-    compiler = PyTorchToCCompiler(verbose=verbose)
-    return compiler.compile(model, example_input, output_dir)
+    compiler = PyTorchToCCompiler(verbose=verbose and not return_ir)
+    return compiler.compile(model, example_input, output_dir, return_ir_only=return_ir)
 

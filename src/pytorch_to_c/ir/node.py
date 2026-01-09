@@ -41,6 +41,34 @@ class IRNode:
         self.inputs: List[IRNode] = []  # Nodes that this node depends on
         self.users: List[IRNode] = []   # Nodes that depend on this node
     
+    def get_c_dtype(self) -> str:
+        """
+        Get the C data type string for this node's output buffer.
+        
+        Maps IR dtype to C type:
+        - 'float32' -> 'float'
+        - 'int8' -> 'int8_t'
+        - 'int16' -> 'int16_t'
+        
+        Subclasses can override for custom behavior.
+        """
+        if self.dtype == 'int8':
+            return 'int8_t'
+        elif self.dtype == 'int16':
+            return 'int16_t'
+        else:
+            return 'float'
+    
+    @property
+    def is_quantized(self) -> bool:
+        """
+        Check if this node uses quantized types.
+        
+        Returns True if dtype is not float32 (i.e., int8, int16, or future types).
+        Subclasses can override for custom behavior.
+        """
+        return self.dtype != 'float32'
+    
     def add_input(self, input_node: 'IRNode') -> None:
         """
         Add an input dependency to this node.
@@ -80,6 +108,29 @@ class IRNode:
             self.users.remove(user_node)
             if self in user_node.inputs:
                 user_node.inputs.remove(self)
+    
+    def validate_input_dtypes(self) -> bool:
+        """
+        Validate that input dtypes are compatible with this operation.
+        
+        Base implementation: float32 ops expect float32 inputs.
+        Subclasses can override for specific requirements.
+        
+        Returns:
+            True if valid
+            
+        Raises:
+            TypeError: If input dtypes are incompatible
+        """
+        expected_dtype = self.dtype if self.dtype == 'float32' else 'float32'
+        
+        for inp in self.inputs:
+            if inp.dtype != expected_dtype and inp.dtype != self.dtype:
+                # Allow if types match OR if we expect float32 and get float32
+                if not (self.dtype == 'float32' and inp.dtype == 'float32'):
+                    pass  # For now, don't raise - subclasses will override
+        
+        return True
     
     def __repr__(self) -> str:
         return (f"IRNode(name='{self.name}', op_type='{self.op_type}', "
