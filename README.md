@@ -35,23 +35,19 @@ tmp/tiny_resnet_for_embedded_device/
 #include "model.h"
 ```
 
-**Prepare input data:**
+**Prepare input data and run inference:**
 ```c
-// Input: (1, 1, 200, 10) in NHWC layout = 2000 floats
-// Note: PyTorch uses NCHW (1, 10, 1, 200), C uses NHWC (1, 1, 200, 10)
-float input_data[2000];
-// Fill with your sensor data...
-```
+float input_data[2000];   // 1 * 1 * 200 * 10 = 2000 floats
+float output[10];         // 10 classes
 
-**Run inference:**
-```c
-float output[10];  // 10 classes
+// Fill input_data (see "Input Layout" section below)
 model_forward(input_data, output);
-```
 
-**Get prediction:**
-```c
-int predicted_class = argmax(output, 10);
+// Find predicted class
+int predicted_class = 0;
+for (int i = 1; i < 10; i++) {
+    if (output[i] > output[predicted_class]) predicted_class = i;
+}
 ```
 
 ### 5. Compile for Your Target
@@ -64,8 +60,72 @@ gcc -O2 -o model_test main.c model.c -lm
 arm-none-eabi-gcc -mcpu=cortex-m4 -O2 -c model.c -o model.o
 ```
 
+---
+
+## Input Layout (NHWC)
+
+The generated C code uses **NHWC layout** (channels-last), while PyTorch uses **NCHW** (channels-first).
+
+### TinyResNet Example
+
+| | PyTorch (NCHW) | C Code (NHWC) |
+|---|----------------|---------------|
+| **Shape** | `(1, 10, 1, 200)` | `(1, 1, 200, 10)` |
+| **Meaning** | batch, freq_bins, height, time_steps | batch, height, time_steps, freq_bins |
+| **Total floats** | 2000 | 2000 |
+
+### How to Fill the Input Array
+
+For the TinyResNet model with **10 frequency bins** and **200 time steps** (spectrogram input):
+
+```
+NHWC layout: input[time_step * num_freq_bins + freq_bin]
+
+  input[0]   = freq bin 0 at time 0
+  input[1]   = freq bin 1 at time 0
+  ...
+  input[9]   = freq bin 9 at time 0
+  input[10]  = freq bin 0 at time 1
+  input[11]  = freq bin 1 at time 1
+  ...
+  input[1999] = freq bin 9 at time 199
+```
+
+**C code example:**
+```c
+#define NUM_FREQ_BINS 10
+#define NUM_TIMESTEPS 200
+
+float input_data[NUM_TIMESTEPS * NUM_FREQ_BINS];
+
+// Fill from spectrogram (magnitude values)
+for (int t = 0; t < NUM_TIMESTEPS; t++) {
+    for (int f = 0; f < NUM_FREQ_BINS; f++) {
+        input_data[t * NUM_FREQ_BINS + f] = spectrogram[f][t];
+    }
+}
+```
+
+### Converting from PyTorch
+
+If you have a PyTorch tensor in NCHW format, convert it to NHWC:
+
+```python
+# PyTorch tensor: shape (1, 10, 1, 200) in NCHW
+pytorch_input = torch.randn(1, 10, 1, 200)
+
+# Convert to NHWC: shape (1, 1, 200, 10)
+nhwc_input = pytorch_input.permute(0, 2, 3, 1)
+
+# Flatten to 1D array for C
+c_input = nhwc_input.numpy().flatten()  # shape: (2000,)
+```
+
+---
+
 ## Model Details
 
+- **Input:** Spectrogram with 10 frequency bins × 200 time steps
 - **Input shape:** `(1, 10, 1, 200)` NCHW → `(1, 1, 200, 10)` NHWC in C
 - **Output shape:** `(10,)` - 10-class scores
 - **Model size:** ~100KB (int8 quantized)
