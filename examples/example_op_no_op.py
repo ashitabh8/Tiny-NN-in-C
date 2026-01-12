@@ -27,6 +27,7 @@ from src.pytorch_to_c.codegen.c_printer import CPrinter
 from src.pytorch_to_c.quantization import (
     StaticQuantRule,
     QuantizationTransform,
+    DynamicQuantRuleMinMaxPerTensor,
 )
 from src.passes import FuseDequantQuantPass
 
@@ -49,6 +50,7 @@ def main():
     
     # Create model and compile
     model = CustomMLP()
+    # Load the weights into model
     model.eval()
     example_input = torch.randn(1, 784)
     
@@ -84,13 +86,17 @@ def main():
         ),
         StaticQuantRule(
             pattern=r'.*encoder_fc2.*',
-            dtype='int8',
+            dtype='int16',
             input_scale=shared_scale,   # <-- This matches encoder_fc1's output
             input_offset=0,
             weight_scale=weight_scale,
             weight_offset=0,
             output_scale=0.015,     # Output to precision_layer
             output_offset=0
+        ),
+        DynamicQuantRuleMinMaxPerTensor(
+            pattern=r'.*precision_layer.*',
+            dtype='int8'
         ),
     ]
     
@@ -110,7 +116,7 @@ def main():
     # Generate unoptimized code
     os.makedirs("tmp/generated_unoptimized", exist_ok=True)
     printer_before = CPrinter(quant_ir_unopt)
-    printer_before.generate_all("tmp/generated_unoptimized")
+    printer_before.generate_all("tmp/generated_unoptimized_123")
     print("\n📁 Generated unoptimized code: tmp/generated_unoptimized/")
     
     
@@ -145,7 +151,7 @@ def main():
     # Generate optimized code
     os.makedirs("tmp/generated_optimized", exist_ok=True)
     printer_after = CPrinter(optimized_ir)
-    printer_after.generate_all("tmp/generated_optimized")
+    printer_after.generate_all("tmp/generated_optimized_123")
     print("\n📁 Generated optimized code: tmp/generated_optimized/")
     
     # Summary
