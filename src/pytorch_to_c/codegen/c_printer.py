@@ -74,7 +74,8 @@ class CPrinter:
         with open(os.path.join(output_dir, 'model.h'), 'w') as f:
             f.write(model_h)
 
-        with open(os.path.join(output_dir, 'model.c'), 'w') as f:
+        model_filename = 'model.cpp' if self.arduino_mode else 'model.c'
+        with open(os.path.join(output_dir, model_filename), 'w') as f:
             f.write(model_c)
 
         if self.arduino_mode:
@@ -212,74 +213,123 @@ class CPrinter:
         """
         Generate an Arduino .ino sketch that calls model_forward once from loop().
 
-        The input buffer is filled with zeros by default — replace with real sensor
-        data in loop() before calling model_forward().  Buffers are declared as
-        global static arrays to avoid stack overflow on large models.
+        Includes random input generation, profiling checkpoint output, per-class
+        scores, and argmax prediction.  Sizes are derived from the IR graph shapes.
 
         Args:
-            sketch_name: Base name used in the file header comment
+            sketch_name: Base name used in file header and compile instructions
 
         Returns:
             The .ino source as a string
         """
         import math
 
-        lines = []
-        lines.append(f"// Auto-generated Arduino sketch: {sketch_name}")
-        lines.append("// DO NOT EDIT")
-        lines.append("")
-
-        # Annotate shapes
-        if self.ir_graph.inputs:
-            in_shape = self.ir_graph.inputs[0].output_shape
-            if in_shape:
-                lines.append(f"// Input shape  (NCHW): {list(in_shape)}")
-        if self.ir_graph.outputs:
-            out_shape = self.ir_graph.outputs[0].output_shape
-            if out_shape:
-                lines.append(f"// Output shape: {list(out_shape)}")
-        lines.append("")
-
-        lines.append('#include "model.h"')
-        lines.append("")
-
-        # Compute flat buffer sizes
+        # Compute flat buffer sizes from IR graph shapes
         input_size = 0
         output_size = 0
+        in_shape_str = "unknown"
+        out_shape_str = "unknown"
+
         if self.ir_graph.inputs:
             shape = self.ir_graph.inputs[0].output_shape
             if shape:
-                # NCHW (N, C, H, W) -> NHWC flat size = N*H*W*C
+                in_shape_str = str(list(shape))
                 if len(shape) == 4:
                     n, c, h, w = shape
                     input_size = n * h * w * c
+                    nhwc_comment = f"{n} * {h} * {w} * {c}  (NHWC)"
                 else:
                     input_size = math.prod(shape)
+                    nhwc_comment = f"flat {input_size}"
+            else:
+                nhwc_comment = "unknown"
+
         if self.ir_graph.outputs:
             shape = self.ir_graph.outputs[0].output_shape
             if shape:
+                out_shape_str = str(list(shape))
                 output_size = math.prod(shape)
 
-        lines.append(f"// Global buffers — avoids stack overflow for large activations")
-        lines.append(f"static float input_buf[{input_size}];")
-        lines.append(f"static float output_buf[{output_size}];")
-        lines.append("static bool _inference_done = false;")
+        lines = []
+        lines.append("/*")
+        lines.append(f" * Auto-generated Arduino runner: {sketch_name}")
+        lines.append(" *")
+        lines.append(f" * Copy this file and all files from the generated code directory")
+        lines.append(f" * into a single Arduino sketch folder named \"{sketch_name}\".")
+        lines.append(f" * (Folder name must match the .ino filename.)")
+        lines.append(" *")
+        lines.append(" * Board: Arduino Giga R1  (FQBN: arduino:mbed_giga:giga)")
+        lines.append(" *")
+        lines.append(" * Compile check (no upload):")
+        lines.append(f" *   arduino-cli compile --fqbn arduino:mbed_giga:giga {sketch_name}/")
+        lines.append(" *")
+        lines.append(f" * Model I/O:")
+        lines.append(f" *   Input  (NCHW): {in_shape_str}  ->  NHWC flat: {input_size} floats")
+        lines.append(f" *   Output        : {out_shape_str}  ->  {output_size} class scores")
+        lines.append(" */")
         lines.append("")
-
+        lines.append('#include "model.h"')
+        lines.append("")
+        lines.append("// ---------------------------------------------------------------------------")
+        lines.append("// Buffer sizes")
+        lines.append("// ---------------------------------------------------------------------------")
+        lines.append(f"#define INPUT_SIZE  {input_size}   // {nhwc_comment}")
+        lines.append(f"#define OUTPUT_SIZE {output_size}")
+        lines.append("")
+        lines.append("// Global arrays — keeps them off the stack (avoids stack overflow)")
+        lines.append("static float input_buf[INPUT_SIZE];")
+        lines.append("static float output_buf[OUTPUT_SIZE];")
+        lines.append("static bool  _done = false;")
+        lines.append("")
+        lines.append("// ---------------------------------------------------------------------------")
+        lines.append("// setup")
+        lines.append("// ---------------------------------------------------------------------------")
         lines.append("void setup() {")
         lines.append("    Serial.begin(115200);")
-        lines.append("    while (!Serial) {}")
-        lines.append("    // TODO: fill input_buf with real sensor data before inference")
-        lines.append("    for (int i = 0; i < " + str(input_size) + "; ++i)")
-        lines.append("        input_buf[i] = 0.0f;")
+        lines.append("    while (!Serial) {}   // wait for USB serial on Giga R1")
+        lines.append("")
+        lines.append("    // Seed RNG from a floating ADC pin (unconnected = noise)")
+        lines.append("    randomSeed(analogRead(A0));")
+        lines.append("")
+        lines.append("    // Fill input with random floats in [-1.0, 1.0]")
+        lines.append("    // Replace this block with real sensor data in your application.")
+        lines.append("    for (int i = 0; i < INPUT_SIZE; ++i) {")
+        lines.append("        // random(-1000, 1001) gives integers in [-1000, 1000]")
+        lines.append("        input_buf[i] = (float)random(-1000, 1001) / 1000.0f;")
+        lines.append("    }")
+        lines.append("")
+        lines.append('    Serial.println("Input buffer filled with random data.");')
+        lines.append('    Serial.println("Running model_forward...");')
+        lines.append('    Serial.println();')
         lines.append("}")
         lines.append("")
-
+        lines.append("// ---------------------------------------------------------------------------")
+        lines.append("// loop — runs inference once, then halts")
+        lines.append("// ---------------------------------------------------------------------------")
         lines.append("void loop() {")
-        lines.append("    if (_inference_done) return;")
-        lines.append("    _inference_done = true;")
+        lines.append("    if (_done) return;")
+        lines.append("    _done = true;")
         lines.append("")
+        lines.append("    // model_forward prints profiling checkpoints (Serial.print) internally")
         lines.append("    model_forward(input_buf, output_buf);")
+        lines.append("")
+        lines.append("    // Print output class scores")
+        lines.append('    Serial.println();')
+        lines.append('    Serial.println("Output scores:");')
+        lines.append("    for (int i = 0; i < OUTPUT_SIZE; ++i) {")
+        lines.append('        Serial.print("  class ");')
+        lines.append("        Serial.print(i);")
+        lines.append('        Serial.print(": ");')
+        lines.append("        Serial.println(output_buf[i], 6);")
+        lines.append("    }")
+        lines.append("")
+        lines.append("    // Find argmax")
+        lines.append("    int best = 0;")
+        lines.append("    for (int i = 1; i < OUTPUT_SIZE; ++i) {")
+        lines.append("        if (output_buf[i] > output_buf[best]) best = i;")
+        lines.append("    }")
+        lines.append('    Serial.print("Predicted class: ");')
+        lines.append("    Serial.println(best);")
         lines.append("}")
         lines.append("")
 
@@ -345,6 +395,10 @@ class CPrinter:
             if out_shape:
                 lines.append(f"// Output shape: {list(out_shape)}")
         lines.append("")
+
+        if self.arduino_mode:
+            lines.append("#include <Arduino.h>")
+            lines.append("")
 
         lines.append("#include \"model.h\"")
         lines.append("#include \"weights.h\"")
