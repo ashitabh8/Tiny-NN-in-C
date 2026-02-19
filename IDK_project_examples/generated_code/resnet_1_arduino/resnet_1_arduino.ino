@@ -1,14 +1,14 @@
 /*
- * Auto-generated Arduino runner: resnet_1_sketch
+ * Auto-generated Arduino runner: resnet_1_arduino
  *
  * Copy this file and all files from the generated code directory
- * into a single Arduino sketch folder named "resnet_1_sketch".
+ * into a single Arduino sketch folder named "resnet_1_arduino".
  * (Folder name must match the .ino filename.)
  *
  * Board: Arduino Giga R1  (FQBN: arduino:mbed_giga:giga)
  *
  * Compile check (no upload):
- *   arduino-cli compile --fqbn arduino:mbed_giga:giga resnet_1_sketch/
+ *   arduino-cli compile --fqbn arduino:mbed_giga:giga resnet_1_arduino/
  *
  * Model I/O:
  *   Input  (NCHW): [1, 6, 7, 256]  ->  NHWC flat: 10752 floats

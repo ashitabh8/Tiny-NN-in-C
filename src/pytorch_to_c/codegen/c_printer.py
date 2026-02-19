@@ -50,17 +50,22 @@ class CPrinter:
         self.buffer_counter = 0
         self.arduino_mode = arduino_mode
 
-    def generate_all(self, output_dir: str, sketch_name: str = "model_sketch") -> None:
+    def generate_all(self, output_dir: str, sketch_name: str = None) -> None:
         """
         Generate all C files and copy necessary headers.
 
         In arduino_mode, also generates a <sketch_name>.ino with setup()/loop().
+        The sketch name defaults to the basename of output_dir so the .ino
+        filename always matches its containing folder (Arduino requirement).
 
         Args:
             output_dir:  Directory to write generated files to
-            sketch_name: Base name for the .ino sketch (arduino_mode only)
+            sketch_name: Base name for the .ino sketch (arduino_mode only).
+                         Defaults to os.path.basename(output_dir).
         """
         os.makedirs(output_dir, exist_ok=True)
+        if sketch_name is None:
+            sketch_name = os.path.basename(os.path.abspath(output_dir))
 
         # Generate each file
         weights_h = self.generate_weights_h()
