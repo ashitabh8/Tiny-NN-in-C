@@ -154,6 +154,8 @@ class Lowering:
             ir_node = self._lower_batchnorm2d(fx_node, module)
         elif isinstance(module, torch.nn.Softmax):
             ir_node = self._lower_softmax(fx_node, module)
+        elif isinstance(module, torch.nn.AdaptiveAvgPool2d):
+            ir_node = self._lower_adaptive_avg_pool(fx_node, module)
         else:
             raise ValueError(f"Unsupported module type: {module_type}")
         
@@ -308,7 +310,23 @@ class Lowering:
             }
         )
         return ir_node
-    
+
+    def _lower_adaptive_avg_pool(
+        self,
+        fx_node: fx.Node,
+        module: torch.nn.AdaptiveAvgPool2d
+    ) -> IRNode:
+        """Lower AdaptiveAvgPool2d (e.g. (1,1) -> global average pool)."""
+        ir_node = IRNode(
+            name=fx_node.name,
+            op_type='adaptive_avg_pool',
+            dtype='float32',
+            metadata={
+                'output_size': module.output_size,
+            }
+        )
+        return ir_node
+
     def _lower_call_function(self, fx_node: fx.Node) -> IRNode:
         """Lower a functional call (e.g., torch.add, torch.mul)."""
         func_name = fx_node.target.__name__ if hasattr(fx_node.target, '__name__') else str(fx_node.target)

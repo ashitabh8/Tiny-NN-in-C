@@ -150,6 +150,7 @@ def main():
     
     # Configuration
     OUTPUT_DIR = "tmp/tiny_resnet_for_embedded_device"
+    OUTPUT_DIR_FLOAT = "tmp/tiny_resnet_for_embedded_device_float"
     INPUT_SHAPE = (1, 10, 1, 200)  # (batch, channels, height=1, width=200)
     NUM_CLASSES = 10
     HIDDEN_CHANNELS = 64
@@ -222,6 +223,11 @@ def main():
     for rule in rules:
         print(f"     - pattern='{rule.pattern}', dtype={rule.dtype}")
         print(f"       input_scale={rule.input_scale}, weight_scale={rule.weight_scale}")
+
+    printer_unoptimized = CPrinter(ir_graph)
+    printer_unoptimized.generate_all(OUTPUT_DIR_FLOAT)
+
+    print("GEenrated float code to ", OUTPUT_DIR_FLOAT)
     
     transform = QuantizationTransform(rules)
     quant_ir = transform.apply(ir_graph)

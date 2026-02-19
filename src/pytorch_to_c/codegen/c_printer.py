@@ -7,7 +7,7 @@ For quantized nodes, delegates code generation to the node itself.
 
 import os
 import shutil
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 import numpy as np
 
@@ -17,51 +17,71 @@ from ..ir.node import IRNode
 # for custom code generation. See _generate_node_code() for details.
 from .ops_map import OpMapping
 
+try:
+    from ..profiling.ops.profiling_utils import ProfilingWrapperNode
+except ImportError:
+    ProfilingWrapperNode = None  # type: ignore
+
 
 class CPrinter:
     """
     Generates C code from an IR graph.
-    
-    Outputs:
+
+    Outputs (standard mode):
     - model.c: Main model implementation
     - model.h: Function declarations and interface
     - weights.h: Serialized parameter data
+
+    Outputs (arduino_mode=True):
+    - All of the above, plus a <sketch_name>.ino with setup()/loop()
+    - Timing uses micros() instead of clock(), Serial.print instead of printf
     """
-    
-    def __init__(self, ir_graph: IRGraph):
+
+    def __init__(self, ir_graph: IRGraph, arduino_mode: bool = False):
         """
         Initialize the C code generator.
-        
+
         Args:
             ir_graph: The IR graph to generate code from
+            arduino_mode: When True, emit Arduino-compatible timing/print primitives
+                          and generate a .ino sketch file
         """
         self.ir_graph = ir_graph
         self.buffer_counter = 0
-    
-    def generate_all(self, output_dir: str) -> None:
+        self.arduino_mode = arduino_mode
+
+    def generate_all(self, output_dir: str, sketch_name: str = "model_sketch") -> None:
         """
         Generate all C files and copy necessary headers.
-        
+
+        In arduino_mode, also generates a <sketch_name>.ino with setup()/loop().
+
         Args:
-            output_dir: Directory to write generated files to
+            output_dir:  Directory to write generated files to
+            sketch_name: Base name for the .ino sketch (arduino_mode only)
         """
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # Generate each file
         weights_h = self.generate_weights_h()
         model_h = self.generate_model_h()
         model_c = self.generate_model_c()
-        
+
         # Write files
         with open(os.path.join(output_dir, 'weights.h'), 'w') as f:
             f.write(weights_h)
-        
+
         with open(os.path.join(output_dir, 'model.h'), 'w') as f:
             f.write(model_h)
-        
+
         with open(os.path.join(output_dir, 'model.c'), 'w') as f:
             f.write(model_c)
-        
+
+        if self.arduino_mode:
+            ino = self.generate_arduino_sketch(sketch_name)
+            with open(os.path.join(output_dir, f'{sketch_name}.ino'), 'w') as f:
+                f.write(ino)
+
         # Copy C ops header to output directory for self-contained deployment
         self._copy_c_ops_headers(output_dir)
     
@@ -187,7 +207,84 @@ class CPrinter:
         lines.append("")
         lines.append("#endif // MODEL_H_")
         return "\n".join(lines)
-    
+
+    def generate_arduino_sketch(self, sketch_name: str = "model_sketch") -> str:
+        """
+        Generate an Arduino .ino sketch that calls model_forward once from loop().
+
+        The input buffer is filled with zeros by default — replace with real sensor
+        data in loop() before calling model_forward().  Buffers are declared as
+        global static arrays to avoid stack overflow on large models.
+
+        Args:
+            sketch_name: Base name used in the file header comment
+
+        Returns:
+            The .ino source as a string
+        """
+        import math
+
+        lines = []
+        lines.append(f"// Auto-generated Arduino sketch: {sketch_name}")
+        lines.append("// DO NOT EDIT")
+        lines.append("")
+
+        # Annotate shapes
+        if self.ir_graph.inputs:
+            in_shape = self.ir_graph.inputs[0].output_shape
+            if in_shape:
+                lines.append(f"// Input shape  (NCHW): {list(in_shape)}")
+        if self.ir_graph.outputs:
+            out_shape = self.ir_graph.outputs[0].output_shape
+            if out_shape:
+                lines.append(f"// Output shape: {list(out_shape)}")
+        lines.append("")
+
+        lines.append('#include "model.h"')
+        lines.append("")
+
+        # Compute flat buffer sizes
+        input_size = 0
+        output_size = 0
+        if self.ir_graph.inputs:
+            shape = self.ir_graph.inputs[0].output_shape
+            if shape:
+                # NCHW (N, C, H, W) -> NHWC flat size = N*H*W*C
+                if len(shape) == 4:
+                    n, c, h, w = shape
+                    input_size = n * h * w * c
+                else:
+                    input_size = math.prod(shape)
+        if self.ir_graph.outputs:
+            shape = self.ir_graph.outputs[0].output_shape
+            if shape:
+                output_size = math.prod(shape)
+
+        lines.append(f"// Global buffers — avoids stack overflow for large activations")
+        lines.append(f"static float input_buf[{input_size}];")
+        lines.append(f"static float output_buf[{output_size}];")
+        lines.append("static bool _inference_done = false;")
+        lines.append("")
+
+        lines.append("void setup() {")
+        lines.append("    Serial.begin(115200);")
+        lines.append("    while (!Serial) {}")
+        lines.append("    // TODO: fill input_buf with real sensor data before inference")
+        lines.append("    for (int i = 0; i < " + str(input_size) + "; ++i)")
+        lines.append("        input_buf[i] = 0.0f;")
+        lines.append("}")
+        lines.append("")
+
+        lines.append("void loop() {")
+        lines.append("    if (_inference_done) return;")
+        lines.append("    _inference_done = true;")
+        lines.append("")
+        lines.append("    model_forward(input_buf, output_buf);")
+        lines.append("}")
+        lines.append("")
+
+        return "\n".join(lines)
+
     def _has_nodes_with_dtype(self, dtype: str) -> bool:
         """
         Check if graph has any nodes with the specified dtype.
@@ -207,22 +304,52 @@ class CPrinter:
         """
         return node.get_c_dtype()
     
+    def _has_buffer(self, node: IRNode) -> bool:
+        """True if this node produces an output buffer (not input or method_size)."""
+        return node.op_type not in ('input', 'method_size')
+
+    def _has_profiling_nodes(self) -> bool:
+        """True if the graph contains any ProfilingWrapperNode (needs time.h, stdio.h)."""
+        if ProfilingWrapperNode is None:
+            return False
+        return any(isinstance(n, ProfilingWrapperNode) for n in self.ir_graph.nodes)
+
+    def _compute_buffer_last_use(self, order: List[IRNode]) -> Dict[str, IRNode]:
+        """
+        Compute for each buffer-producing node the last node (in execution order) that uses it.
+        Used to close blocks so buffers go out of scope after their last use (reduces peak memory).
+        """
+        last_use: Dict[str, IRNode] = {}
+        for node in order:
+            for inp in node.inputs:
+                last_use[inp.name] = node
+        return last_use
+
     def generate_model_c(self) -> str:
         """
         Generate model.c with the main implementation.
-        
-        Returns:
-            The C code as a string
+        Uses liveness analysis: each activation buffer is declared in a block and the block
+        is closed after the buffer's last use to reduce peak stack memory.
         """
         lines = []
         lines.append("// Auto-generated model implementation")
         lines.append("// DO NOT EDIT")
         lines.append("")
+
+        if self.ir_graph.inputs:
+            in_shape = self.ir_graph.inputs[0].output_shape
+            if in_shape:
+                lines.append(f"// Input shape  (NCHW): {list(in_shape)}")
+        if self.ir_graph.outputs:
+            out_shape = self.ir_graph.outputs[0].output_shape
+            if out_shape:
+                lines.append(f"// Output shape: {list(out_shape)}")
+        lines.append("")
+
         lines.append("#include \"model.h\"")
         lines.append("#include \"weights.h\"")
         lines.append("#include \"nn_ops_float.h\"")
         
-        # Include quantized ops headers if needed
         if self._has_nodes_with_dtype('int8'):
             lines.append("#include \"nn_ops_int8.h\"")
         if self._has_nodes_with_dtype('int16'):
@@ -230,40 +357,71 @@ class CPrinter:
         
         lines.append("")
         lines.append("#include <string.h>")
+        if self._has_profiling_nodes() and not self.arduino_mode:
+            lines.append("#include <time.h>")
+            lines.append("#include <stdio.h>")
         lines.append("")
         
-        # Generate the forward function
-        lines.append("void model_forward(const float* input, float* output) {")
-        lines.append("    // Intermediate buffers")
-        
-        # Declare buffers for each node with correct dtype
         buffer_sizes = self._calculate_buffer_sizes()
-        for node in self.ir_graph.nodes:
-            if node.op_type != 'input':
-                size = buffer_sizes.get(node.name, 1024)  # Default size
-                dtype = self._get_buffer_dtype(node)
-                lines.append(f"    {dtype} {self._get_buffer_name(node)}[{size}];")
+        order = self.ir_graph.topological_sort()
+        last_use = self._compute_buffer_last_use(order)
+        output_node = self.ir_graph.outputs[0] if self.ir_graph.outputs else None
         
-        lines.append("")
-        lines.append("    // Forward pass")
+        base_indent = "    "
+
+        lines.append("void model_forward(const float* input, float* output) {")
+        if self._has_profiling_nodes():
+            if self.arduino_mode:
+                lines.append(base_indent + "unsigned long _t_start = micros();")
+            else:
+                lines.append(base_indent + "clock_t _t_start = clock();")
+
+        # Stack of (node_name, indent for closing "}") for currently open blocks
+        stack: List[tuple] = []
         
-        # Generate code for each node
-        for node in self.ir_graph.nodes:
+        for i, node in enumerate(order):
+            prev_node = order[i - 1] if i > 0 else None
+            
+            # Close blocks for buffers whose last use was the previous node
+            if prev_node is not None:
+                to_close = {
+                    p.name for p in order
+                    if self._has_buffer(p) and last_use.get(p.name) == prev_node
+                }
+                while stack and stack[-1][0] in to_close:
+                    name, ind = stack.pop()
+                    lines.append(ind + "}")
+                    to_close.discard(name)
+            
+            if node.op_type in ('input', 'method_size'):
+                node_code = self._generate_node_code(node)
+                if node_code:
+                    indent = base_indent + "    " * len(stack)
+                    for line in node_code:
+                        lines.append(indent + line)
+                continue
+            
+            # Node has a buffer: open block, declare, emit code, maybe copy output
+            indent_brace = base_indent * (1 + len(stack))
+            lines.append(indent_brace + "{")
+            stack.append((node.name, indent_brace))
+            indent_inner = indent_brace + base_indent
+            
+            lines.append(indent_inner + f"// {node.name} [{node.op_type}]")
+            size = buffer_sizes[node.name]
+            dtype = self._get_buffer_dtype(node)
+            lines.append(indent_inner + f"{dtype} {self._get_buffer_name(node)}[{size}];")
             node_code = self._generate_node_code(node)
             if node_code:
-                lines.append("")
-                lines.append(f"    // {node.name} [{node.op_type}]")
-                lines.extend([f"    {line}" for line in node_code])
+                for line in node_code:
+                    lines.append(indent_inner + line)
+            if output_node is not None and node.name == output_node.name:
+                lines.append(indent_inner + f"memcpy(output, {self._get_buffer_name(node)}, {size} * sizeof(float));")
         
-        lines.append("")
-        
-        # Copy final output
-        if self.ir_graph.outputs:
-            output_node = self.ir_graph.outputs[0]
-            output_buffer = self._get_buffer_name(output_node)
-            output_size = buffer_sizes.get(output_node.name, 1024)
-            lines.append(f"    // Copy output")
-            lines.append(f"    memcpy(output, {output_buffer}, {output_size} * sizeof(float));")
+        # Close any remaining open blocks
+        while stack:
+            _, ind = stack.pop()
+            lines.append(ind + "}")
         
         lines.append("}")
         lines.append("")
@@ -282,7 +440,9 @@ class CPrinter:
         for node in self.ir_graph.nodes:
             if node.op_type == 'input':
                 continue
-            
+            if node.op_type == 'method_size':
+                continue  # scalar int, no buffer
+
             # First priority: use inferred shape if available
             if node.output_shape is not None:
                 # Calculate total number of elements from shape
@@ -300,23 +460,53 @@ class CPrinter:
                 
                 continue
             
-            # Fallback: Estimate size based on operation type and metadata
+            # No output_shape: require operation-specific info; raise if missing
             if node.op_type == 'linear':
-                sizes[node.name] = node.metadata.get('out_features', 1024)
+                if 'out_features' not in node.metadata:
+                    raise ValueError(f"{node.name} (linear): missing metadata 'out_features'; need shape inference or metadata")
+                sizes[node.name] = node.metadata['out_features']
             elif node.op_type == 'conv2d':
-                # Estimate from metadata (this is less accurate than shape inference)
-                sizes[node.name] = 1024  # Fallback
+                raise ValueError(f"{node.name} (conv2d): missing output_shape; run with example_input for shape inference")
             elif node.op_type in ['relu', 'softmax', 'batchnorm']:
-                # Same size as input
-                if node.inputs:
-                    input_size = sizes.get(node.inputs[0].name, 1024)
-                    sizes[node.name] = input_size
-                else:
-                    sizes[node.name] = 1024
+                if not node.inputs:
+                    raise ValueError(f"{node.name} ({node.op_type}): no input node")
+                input_size = self._node_buffer_size(sizes, node.inputs[0])
+                if input_size is None:
+                    raise ValueError(f"{node.name} ({node.op_type}): input shape unknown; run with example_input for shape inference")
+                sizes[node.name] = input_size
+            elif node.op_type == 'adaptive_avg_pool':
+                if not node.inputs or not node.inputs[0].output_shape or len(node.inputs[0].output_shape) != 4:
+                    raise ValueError(f"{node.name} (adaptive_avg_pool): need input with 4D shape [B,C,H,W]; run with example_input for shape inference")
+                sizes[node.name] = node.inputs[0].output_shape[1]
+            elif node.op_type in ('method_view', 'method_flatten'):
+                if not node.inputs:
+                    raise ValueError(f"{node.name} ({node.op_type}): no input node")
+                input_size = self._node_buffer_size(sizes, node.inputs[0])
+                if input_size is None:
+                    raise ValueError(f"{node.name} ({node.op_type}): input shape unknown; run with example_input for shape inference")
+                sizes[node.name] = input_size
             else:
-                sizes[node.name] = 1024  # Default fallback
+                raise ValueError(f"{node.name}: unknown op_type '{node.op_type}' and no output_shape; run with example_input for shape inference")
         
         return sizes
+
+    def _node_buffer_size(self, sizes: Dict[str, int], node: IRNode) -> Optional[int]:
+        """Return buffer size for a node from sizes dict or output_shape. None if unknown."""
+        if node.name in sizes:
+            return sizes[node.name]
+        if node.op_type == 'input' and node.output_shape is not None:
+            import math
+            shape = node.output_shape
+            if len(shape) > 0 and shape[0] == 1:
+                shape = shape[1:]
+            return math.prod(shape) if shape else 1
+        if node.output_shape is not None:
+            import math
+            shape = node.output_shape
+            if len(shape) > 0 and shape[0] == 1:
+                shape = shape[1:]
+            return math.prod(shape) if shape else 1
+        return None
     
     def _generate_node_code(self, node: IRNode) -> List[str]:
         """
@@ -364,7 +554,16 @@ class CPrinter:
         
         elif node.op_type == 'method_mean':
             return self._generate_mean(node)
-        
+
+        elif node.op_type == 'adaptive_avg_pool':
+            return self._generate_adaptive_avg_pool(node)
+
+        elif node.op_type in ('method_view', 'method_flatten'):
+            return self._generate_flatten_or_view(node)
+
+        elif node.op_type == 'method_size':
+            return []  # scalar integer, no buffer
+
         else:
             return [f"// Unsupported operation: {node.op_type}"]
     
@@ -558,7 +757,33 @@ class CPrinter:
             lines.append(f"// TODO: Mean operation - shape inference needed")
         
         return lines
-    
+
+    def _generate_adaptive_avg_pool(self, node: IRNode) -> List[str]:
+        """
+        Generate code for AdaptiveAvgPool2d (e.g. (1,1) -> global average pool).
+        Uses global_average_pool_2d; input is NHWC [H, W, C] from NCHW [B, C, H, W].
+        """
+        lines = []
+        input_buffer = self._get_input_buffer(node, 0)
+        output_buffer = self._get_buffer_name(node)
+        h, w, c = 32, 32, 64  # defaults
+        if node.inputs and node.inputs[0].output_shape and len(node.inputs[0].output_shape) == 4:
+            _, c, h, w = node.inputs[0].output_shape
+        lines.append(
+            f"global_average_pool_2d({input_buffer}, {h}, {w}, {c}, {output_buffer});"
+        )
+        return lines
+
+    def _generate_flatten_or_view(self, node: IRNode) -> List[str]:
+        """Generate code for view/flatten: copy input buffer to output buffer (reshape)."""
+        lines = []
+        input_buffer = self._get_input_buffer(node, 0)
+        output_buffer = self._get_buffer_name(node)
+        buffer_sizes = self._calculate_buffer_sizes()
+        size = buffer_sizes[node.name]
+        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
+        return lines
+
     def _get_buffer_name(self, node: IRNode) -> str:
         """Get the C variable name for a node's output buffer."""
         if node.op_type == 'input':
