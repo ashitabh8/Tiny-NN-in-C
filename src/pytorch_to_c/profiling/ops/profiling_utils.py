@@ -60,13 +60,13 @@ class ProfilingWrapperNode(IRNode):
         arduino = getattr(c_printer, 'arduino_mode', False)
 
         if arduino:
-            lines.append("unsigned long _t_end = micros();")
+            lines.append("_t_end = micros();")
             ms_expr = "(_t_end - _t_start) / 1000.0f"
             lines.append(f'Serial.print("{escaped}: ");')
             lines.append(f'Serial.print({ms_expr}, 2);')
             lines.append('Serial.println(" ms");')
         else:
-            lines.append("clock_t _t_end = clock();")
+            lines.append("_t_end = clock();")
             lines.append(f'printf("{escaped}: %.2f ms\\n", 1000.0 * (_t_end - _t_start) / CLOCKS_PER_SEC);')
 
         return lines

@@ -104,7 +104,7 @@ class TestCodegen:
         assert printer._sanitize_name("1layer") == "_1layer"
     
     def test_buffer_allocation(self):
-        """Test that buffers are allocated for nodes."""
+        """Test that buffers are allocated via slots (flat, no nesting)."""
         model = TinyMLP()
         example_input = torch.randn(1, 784)
         
@@ -114,8 +114,11 @@ class TestCodegen:
         printer = CPrinter(ir_graph)
         model_c = printer.generate_model_c()
         
-        # Check that buffers are declared
-        assert "float buf_" in model_c
+        # Check that slot buffers are declared (interval graph coloring)
+        assert "float slot_" in model_c
+        # Linear chain (MLP) should need exactly 2 slots
+        assert "float slot_0[" in model_c
+        assert "float slot_1[" in model_c
         
         # Check that operations are called
         assert "dense(" in model_c or "linear" in model_c.lower()

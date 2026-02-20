@@ -7,7 +7,7 @@ For quantized nodes, delegates code generation to the node itself.
 
 import os
 import shutil
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import numpy as np
 
@@ -380,6 +380,77 @@ class CPrinter:
                 last_use[inp.name] = node
         return last_use
 
+    def _assign_buffer_slots(
+        self,
+        order: List[IRNode],
+        buffer_sizes: Dict[str, int],
+        last_use: Dict[str, IRNode],
+    ) -> Tuple[Dict[str, int], Dict[int, int], int]:
+        """
+        Assign each buffer-producing node to a reusable slot using interval graph coloring.
+        Relu nodes are skipped (they share their input's slot, in-place).
+        Returns (slot_assignments, slot_sizes, num_slots).
+        """
+        order_index = {n.name: i for i, n in enumerate(order)}
+
+        # last_use_idx: node_name -> index of last node that uses it
+        last_use_idx: Dict[str, int] = {}
+        for node in order:
+            if node.op_type in ('input', 'method_size'):
+                continue
+            if node.op_type == 'relu':
+                continue  # relu does not get its own slot
+            if not self._has_buffer(node):
+                continue
+            def_idx = order_index[node.name]
+            lu_node = last_use.get(node.name, node)
+            last_use_idx[node.name] = order_index[lu_node.name]
+
+        # Extend relu input's last_use_idx to when relu's output is last used
+        for node in order:
+            if node.op_type == 'relu' and node.inputs:
+                inp = node.inputs[0]
+                if inp.name not in last_use_idx:
+                    continue
+                lu_relu = last_use.get(node.name, node)
+                relu_last_idx = order_index[lu_relu.name]
+                last_use_idx[inp.name] = max(last_use_idx[inp.name], relu_last_idx)
+
+        # Build list of (node_name, def_idx, last_use_idx, size) for slot assignment
+        intervals: List[Tuple[str, int, int, int]] = []
+        for node in order:
+            if node.op_type in ('input', 'method_size', 'relu'):
+                continue
+            if not self._has_buffer(node):
+                continue
+            def_idx = order_index[node.name]
+            lu_idx = last_use_idx[node.name]
+            size = buffer_sizes.get(node.name, 1024)
+            intervals.append((node.name, def_idx, lu_idx, size))
+
+        intervals.sort(key=lambda x: x[1])  # sort by def_idx
+
+        # Greedy interval coloring: assign to lowest free slot
+        slot_assignments: Dict[str, int] = {}
+        slot_last_use: Dict[int, int] = {}
+        slot_sizes: Dict[int, int] = {}
+
+        for node_name, def_idx, lu_idx, size in intervals:
+            found_slot = None
+            for slot_id in sorted(slot_last_use.keys()):
+                if slot_last_use[slot_id] < def_idx:
+                    found_slot = slot_id
+                    break
+            if found_slot is None:
+                found_slot = len(slot_last_use)
+                slot_last_use[found_slot] = -1
+            slot_assignments[node_name] = found_slot
+            slot_last_use[found_slot] = lu_idx
+            slot_sizes[found_slot] = max(slot_sizes.get(found_slot, 0), size)
+
+        num_slots = len(slot_sizes)
+        return slot_assignments, slot_sizes, num_slots
+
     def generate_model_c(self) -> str:
         """
         Generate model.c with the main implementation.
@@ -424,67 +495,48 @@ class CPrinter:
         buffer_sizes = self._calculate_buffer_sizes()
         order = self.ir_graph.topological_sort()
         last_use = self._compute_buffer_last_use(order)
+        slot_assignments, slot_sizes, num_slots = self._assign_buffer_slots(order, buffer_sizes, last_use)
+        self._slot_assignments = slot_assignments
         output_node = self.ir_graph.outputs[0] if self.ir_graph.outputs else None
-        
+
         base_indent = "    "
 
         lines.append("void model_forward(const float* input, float* output) {")
         if self._has_profiling_nodes():
             if self.arduino_mode:
-                lines.append(base_indent + "unsigned long _t_start = micros();")
+                lines.append(base_indent + "unsigned long _t_start, _t_end;")
+                lines.append(base_indent + "_t_start = micros();")
             else:
-                lines.append(base_indent + "clock_t _t_start = clock();")
+                lines.append(base_indent + "clock_t _t_start, _t_end;")
+                lines.append(base_indent + "_t_start = clock();")
 
-        # Stack of (node_name, indent for closing "}") for currently open blocks
-        stack: List[tuple] = []
-        
-        for i, node in enumerate(order):
-            prev_node = order[i - 1] if i > 0 else None
-            
-            # Close blocks for buffers whose last use was the previous node
-            if prev_node is not None:
-                to_close = {
-                    p.name for p in order
-                    if self._has_buffer(p) and last_use.get(p.name) == prev_node
-                }
-                while stack and stack[-1][0] in to_close:
-                    name, ind = stack.pop()
-                    lines.append(ind + "}")
-                    to_close.discard(name)
-            
+        # Flat slot declarations at function top (no nesting)
+        for slot_id in range(num_slots):
+            lines.append(base_indent + f"float slot_{slot_id}[{slot_sizes[slot_id]}];")
+        if num_slots > 0:
+            lines.append("")
+
+        for node in order:
             if node.op_type in ('input', 'method_size'):
                 node_code = self._generate_node_code(node)
                 if node_code:
-                    indent = base_indent + "    " * len(stack)
                     for line in node_code:
-                        lines.append(indent + line)
+                        lines.append(base_indent + line)
                 continue
-            
-            # Node has a buffer: open block, declare, emit code, maybe copy output
-            indent_brace = base_indent * (1 + len(stack))
-            lines.append(indent_brace + "{")
-            stack.append((node.name, indent_brace))
-            indent_inner = indent_brace + base_indent
-            
-            lines.append(indent_inner + f"// {node.name} [{node.op_type}]")
-            size = buffer_sizes[node.name]
-            dtype = self._get_buffer_dtype(node)
-            lines.append(indent_inner + f"{dtype} {self._get_buffer_name(node)}[{size}];")
+
+            lines.append(base_indent + f"// {node.name} [{node.op_type}]")
             node_code = self._generate_node_code(node)
             if node_code:
                 for line in node_code:
-                    lines.append(indent_inner + line)
+                    lines.append(base_indent + line)
             if output_node is not None and node.name == output_node.name:
-                lines.append(indent_inner + f"memcpy(output, {self._get_buffer_name(node)}, {size} * sizeof(float));")
-        
-        # Close any remaining open blocks
-        while stack:
-            _, ind = stack.pop()
-            lines.append(ind + "}")
-        
+                size = buffer_sizes[node.name]
+                buf_name = self._get_buffer_name(node)
+                lines.append(base_indent + f"memcpy(output, {buf_name}, {size} * sizeof(float));")
+
+        self._slot_assignments = None  # clear so other code paths don't use stale slots
         lines.append("}")
         lines.append("")
-        
         return "\n".join(lines)
     
     def _calculate_buffer_sizes(self) -> Dict[str, int]:
@@ -687,21 +739,11 @@ class CPrinter:
         return lines
     
     def _generate_relu(self, node: IRNode) -> List[str]:
-        """Generate code for ReLU operation."""
-        lines = []
-        
+        """Generate code for ReLU operation (in-place, no memcpy)."""
         input_buffer = self._get_input_buffer(node, 0)
-        output_buffer = self._get_buffer_name(node)
-        
-        # Get actual size from buffer size calculation
         buffer_sizes = self._calculate_buffer_sizes()
-        size = buffer_sizes.get(node.name, 1024)  # Fall back to 1024 if not found
-        
-        # ReLU can be in-place, but we'll copy for clarity in Phase 1
-        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
-        lines.append(f"relu({output_buffer}, {size});")
-        
-        return lines
+        size = buffer_sizes.get(node.name, 1024)
+        return [f"relu({input_buffer}, {size});"]
     
     def _generate_batchnorm(self, node: IRNode) -> List[str]:
         """Generate code for BatchNorm operation."""
@@ -843,10 +885,17 @@ class CPrinter:
         lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
         return lines
 
-    def _get_buffer_name(self, node: IRNode) -> str:
+    def _get_buffer_name(self, node: IRNode, slot_assignments: Optional[Dict[str, int]] = None) -> str:
         """Get the C variable name for a node's output buffer."""
         if node.op_type == 'input':
             return 'input'
+        slots = slot_assignments if slot_assignments is not None else getattr(self, '_slot_assignments', None)
+        if slots is not None:
+            # Relu shares its input's slot (in-place); relu nodes are not in slot_assignments
+            if node.op_type == 'relu' and node.inputs:
+                return f"slot_{slots[node.inputs[0].name]}"
+            if node.name in slots:
+                return f"slot_{slots[node.name]}"
         return f"buf_{self._sanitize_name(node.name)}"
     
     def _get_input_buffer(self, node: IRNode, input_idx: int) -> str:
