@@ -20,6 +20,4 @@
 // Main model inference function
 void model_forward(const float* input, float* output);
 
-float test_function(float a, float b);
-
 #endif // MODEL_H_

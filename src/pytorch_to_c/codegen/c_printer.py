@@ -290,8 +290,16 @@ class CPrinter:
         lines.append("// setup")
         lines.append("// ---------------------------------------------------------------------------")
         lines.append("void setup() {")
+        lines.append("    pinMode(LED_BUILTIN, OUTPUT);")
+        lines.append("")
+        lines.append("    // Slow blink = setup started")
+        lines.append("    for (int i = 0; i < 10; i++) {")
+        lines.append("        digitalWrite(LED_BUILTIN, HIGH); delay(500);")
+        lines.append("        digitalWrite(LED_BUILTIN, LOW);  delay(500);")
+        lines.append("    }")
         lines.append("    Serial.begin(115200);")
-        lines.append("    while (!Serial) {}   // wait for USB serial on Giga R1")
+        lines.append("    // unsigned long start = millis();")
+        lines.append("    while (!Serial) {}")
         lines.append("")
         lines.append("    // Seed RNG from a floating ADC pin (unconnected = noise)")
         lines.append("    randomSeed(analogRead(A0));")
@@ -512,7 +520,7 @@ class CPrinter:
 
         # Flat slot declarations at function top (no nesting)
         for slot_id in range(num_slots):
-            lines.append(base_indent + f"float slot_{slot_id}[{slot_sizes[slot_id]}];")
+            lines.append(base_indent + f"static float slot_{slot_id}[{slot_sizes[slot_id]}];")
         if num_slots > 0:
             lines.append("")
 
