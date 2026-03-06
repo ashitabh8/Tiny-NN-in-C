@@ -1,4 +1,4 @@
-# PyTorch to C Compiler
+# Tiny-NN-in-C, PyTorch to C Compiler
 
 A compiler that converts PyTorch models into standalone, dependency-free C code for microcontrollers.
 
