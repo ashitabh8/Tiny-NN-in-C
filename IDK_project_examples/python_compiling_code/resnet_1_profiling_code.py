@@ -17,16 +17,16 @@ def main():
     print("Profiling Example - C code with timing and labels")
     print("=" * 60)
 
-    output_dir = "IDK_project_examples/generated_code/resnet_1_profiling_code"
+    output_dir = "IDK_project_examples/generated_code/arduino_resnet_1_very_tinyseismic_profiling_code"
     os.makedirs(output_dir, exist_ok=True)
 
     # 1. Create model and example input
     print("\n[1/4] Creating model and example input...")
     # model = SmallNet()
-    model = TinyResNet()
+    model = TinyResNet(in_channels=4)
     model.eval()
     # NCHW: batch=1, in_channels=6, H=7, W=256
-    example_input = torch.randn(1, 6, 7, 256)
+    example_input = torch.randn(1, 4, 7, 256)
 
     # 2. Compile to IR (no codegen yet)
     print("[2/4] Compiling to IR...")
@@ -41,20 +41,21 @@ def main():
     # 3. Apply profiling: wrap selected nodes with label + timing
     print("[3/4] Applying profiling rules...")
     rules = [
-        ProfilingRule(r"stage2_block0_relu2", label="stage2_block0_relu2"),
+        ProfilingRule(r"stage1_block1_relu2", label="stage1_block1_relu2"),
+        ProfilingRule(r"stage2_block1_relu2", label="stage2_block0_relu2"),
         ProfilingRule(r"final_softmax", label="Final Exit"),
     ]
     ir_graph = ProfilingTransform(rules).apply(ir_graph)
 
     # 4. Generate C to output_dir
     print(f"[4/4] Generating C to {output_dir}/...")
-    printer = CPrinter(ir_graph)
+    printer = CPrinter(ir_graph, arduino_mode=True)
     printer.generate_all(output_dir)
 
     print("\n" + "=" * 60)
     print("Done. Generated files:")
     print("=" * 60)
-    print(f"   {output_dir}/model.c   - model_forward() with printf labels + clock() timing")
+    print(f"   {output_dir}/model.cpp   - model_forward() with printf labels + clock() timing")
     print(f"   {output_dir}/model.h")
     print(f"   {output_dir}/weights.h")
     print(f"   {output_dir}/nn_ops_float.h")

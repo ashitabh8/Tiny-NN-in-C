@@ -88,8 +88,8 @@ class TinyResNet(nn.Module):
     def __init__(self, in_channels: int = 6, num_classes: int = 10):
         super().__init__()
 
-        filter_sizes = [16, 16, 32, 64]
-        fc_dim = 64
+        filter_sizes = [2, 2, 2, 2]
+        fc_dim = 32
 
         # Stem: in_channels -> 16, 5x5 conv, stride=2
         self.stem_conv = nn.Conv2d(in_channels, filter_sizes[0], kernel_size=5, stride=2, padding=2, bias=False)
