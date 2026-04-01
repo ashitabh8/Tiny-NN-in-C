@@ -109,6 +109,7 @@ static inline void dequantize_int16_to_float(
  * @param out_features  Number of output features
  * @param input_scale   Scale used to quantize input
  * @param weight_scale  Scale used to quantize weights
+ * @param output_scale  Scale for output int16 (requantization)
  * @param offset        Quantization offset (zero point)
  * @param y             Output vector (int16), shape: [out_features]
  */
@@ -120,6 +121,7 @@ static inline void dense_int16(
     int out_features,
     float input_scale,
     float weight_scale,
+    float output_scale,
     int offset,
     int16_t* y)
 {
@@ -129,17 +131,16 @@ static inline void dense_int16(
         for (int i = 0; i < in_features; ++i) {
             acc += (int32_t)x[i] * (int32_t)W[i * out_features + o];
         }
-        
+
         // Dequantize: result = acc * input_scale * weight_scale
         float result = (float)acc * input_scale * weight_scale;
-        
+
         // Add bias (in float domain)
         if (bias) {
             result += bias[o];
         }
-        
-        // Requantize to int16 using weight_scale
-        y[o] = quantize_float_to_int16_scalar(result, weight_scale, offset);
+
+        y[o] = quantize_float_to_int16_scalar(result, output_scale, offset);
     }
 }
 
@@ -196,6 +197,7 @@ static inline void relu_int16(
  * @param pad_w          PyTorch-style padding on each column side
  * @param input_scale    Scale used to quantize input
  * @param weight_scale   Scale used to quantize weights
+ * @param output_scale   Scale for output int16 (requantization)
  * @param offset         Zero point offset for output
  * @param out            Output int16 array [H_out, W_out, C_out]
  */
@@ -207,6 +209,7 @@ static inline void conv2d_nhwc_int16(
     int pad_h, int pad_w,
     float input_scale,
     float weight_scale,
+    float output_scale,
     int offset,
     int16_t* out)
 {
@@ -251,8 +254,8 @@ static inline void conv2d_nhwc_int16(
                     result += bias[oc];
                 }
                 
-                // Quantize output
-                out[((oh * out_w + ow) * out_c) + oc] = quantize_float_to_int16_scalar(result, weight_scale, offset);
+                out[((oh * out_w + ow) * out_c) + oc] =
+                    quantize_float_to_int16_scalar(result, output_scale, offset);
             }
         }
     }

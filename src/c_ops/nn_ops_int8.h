@@ -108,30 +108,14 @@ static inline void dequantize_int8_to_float(
  * ============================================================================ */
 
 /**
- * Quantized dense (linear) layer - int8 weights, float32 bias
- * 
- * Formula: y = W * x + b
- * 
- * The computation is done in integer accumulation, then converted to float
- * for bias addition, then quantized back to int8.
- * 
- * @param x           Input int8 array [in_features]
- * @param in_features Number of input features
- * @param W           Weight int8 array [in_features * out_features] (row-major)
- * @param b           Bias float array [out_features] (or NULL)
- * @param out_features Number of output features
- * @param scale       Quantization scale for output
- * @param offset      Zero point offset for output
- * @param y           Output int8 array [out_features]
- */
-/**
  * Quantized dense (linear) layer - int8
- * 
+ *
  * Computes: y = W * x + b
- * 
+ *
  * Uses int32 accumulator, then dequantizes using input_scale * weight_scale,
- * adds float bias, and requantizes output.
- * 
+ * adds float bias, and requantizes output with output_scale (must match the
+ * scale used by a following dequantize step, e.g. StaticQuantRule output_scale).
+ *
  * @param x             Input int8 array [in_features]
  * @param in_features   Number of input features
  * @param W             Weight int8 array [in_features * out_features] (row-major)
@@ -139,6 +123,7 @@ static inline void dequantize_int8_to_float(
  * @param out_features  Number of output features
  * @param input_scale   Scale used to quantize input
  * @param weight_scale  Scale used to quantize weights
+ * @param output_scale  Scale for output int8 (requantization)
  * @param offset        Zero point offset for output
  * @param y             Output int8 array [out_features]
  */
@@ -150,28 +135,28 @@ static inline void dense_int8(
     int out_features,
     float input_scale,
     float weight_scale,
+    float output_scale,
     int offset,
     int8_t* y)
 {
     for (int o = 0; o < out_features; ++o) {
         // Integer accumulation
         int32_t acc = 0;
-        
+
         for (int i = 0; i < in_features; ++i) {
             // W is stored as [in_features, out_features] row-major
             acc += (int32_t)x[i] * (int32_t)W[i * out_features + o];
         }
-        
+
         // Dequantize: result = acc * input_scale * weight_scale
         float result = (float)acc * input_scale * weight_scale;
-        
+
         // Add bias (float32)
         if (b != NULL) {
             result += b[o];
         }
-        
-        // Quantize output using weight_scale
-        y[o] = quantize_scalar_int8(result, weight_scale, offset);
+
+        y[o] = quantize_scalar_int8(result, output_scale, offset);
     }
 }
 
@@ -220,6 +205,7 @@ static inline void relu_int8(int8_t* x, int size) {
  * @param pad_w          PyTorch-style padding on each column side
  * @param input_scale    Scale used to quantize input
  * @param weight_scale   Scale used to quantize weights
+ * @param output_scale   Scale for output int8 (requantization)
  * @param offset         Zero point offset for output
  * @param out            Output int8 array [H_out, W_out, C_out]
  */
@@ -231,6 +217,7 @@ static inline void conv2d_nhwc_int8(
     int pad_h, int pad_w,
     float input_scale,
     float weight_scale,
+    float output_scale,
     int offset,
     int8_t* out)
 {
@@ -275,8 +262,8 @@ static inline void conv2d_nhwc_int8(
                     result += bias[oc];
                 }
                 
-                // Quantize output
-                out[((oh * out_w + ow) * out_c) + oc] = quantize_scalar_int8(result, weight_scale, offset);
+                out[((oh * out_w + ow) * out_c) + oc] =
+                    quantize_scalar_int8(result, output_scale, offset);
             }
         }
     }

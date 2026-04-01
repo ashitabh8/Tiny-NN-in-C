@@ -127,7 +127,7 @@ class StaticQuantConv2dNode(QuantIRNode):
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
                 f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.offset}, "
+                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
         elif self.dtype == 'int16':
@@ -136,7 +136,7 @@ class StaticQuantConv2dNode(QuantIRNode):
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
                 f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.offset}, "
+                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
         else:
@@ -265,7 +265,7 @@ class DynamicQuantConv2dNode(QuantIRNode):
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
                 f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
-                f"{input_scale_var}, {self.weight_scale}f, {self.offset}, "
+                f"{input_scale_var}, {self.weight_scale}f, {self.weight_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
         elif self.dtype == 'int16':
@@ -274,7 +274,7 @@ class DynamicQuantConv2dNode(QuantIRNode):
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
                 f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
-                f"{input_scale_var}, {self.weight_scale}f, {self.offset}, "
+                f"{input_scale_var}, {self.weight_scale}f, {self.weight_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
         else:

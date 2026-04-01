@@ -115,7 +115,7 @@ class StaticQuantLinearNode(QuantIRNode):
                 f"dense_int8("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {bias_name}, {out_features}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.offset}, "
+                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
         elif self.dtype == 'int16':
@@ -123,7 +123,7 @@ class StaticQuantLinearNode(QuantIRNode):
                 f"dense_int16("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {bias_name}, {out_features}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.offset}, "
+                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
         else:
@@ -239,7 +239,7 @@ class DynamicQuantLinearNode(QuantIRNode):
                 f"dense_int8("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {bias_name}, {out_features}, "
-                f"{input_scale_var}, {self.weight_scale}f, {self.offset}, "
+                f"{input_scale_var}, {self.weight_scale}f, {self.weight_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
         elif self.dtype == 'int16':
@@ -247,7 +247,7 @@ class DynamicQuantLinearNode(QuantIRNode):
                 f"dense_int16("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {bias_name}, {out_features}, "
-                f"{input_scale_var}, {self.weight_scale}f, {self.offset}, "
+                f"{input_scale_var}, {self.weight_scale}f, {self.weight_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
         else:
