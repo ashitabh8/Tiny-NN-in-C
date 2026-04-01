@@ -46,7 +46,7 @@ class OpMapping:
             A string describing the function signature
         """
         signatures = {
-            'conv2d': 'conv2d_nhwc(in, h, w, c_in, filt, k_h, k_w, c_out, bias, stride_h, stride_w, pad_same, out)',
+            'conv2d': 'conv2d_nhwc(in, h, w, c_in, filt, k_h, k_w, c_out, bias, stride_h, stride_w, pad_h, pad_w, out)',
             'linear': 'dense(x, in_features, W, b, out_features, y)',
             'relu': 'relu(x, n)',
             'batchnorm': 'batchnorm2d_nhwc(in, h, w, c, gamma, beta, mean, var, eps, out)',

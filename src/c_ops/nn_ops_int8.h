@@ -216,7 +216,8 @@ static inline void relu_int8(int8_t* x, int size) {
  * @param bias           Bias float array [C_out] (or NULL)
  * @param stride_h       Stride height
  * @param stride_w       Stride width
- * @param pad_same       1 for SAME padding, 0 for VALID
+ * @param pad_h          PyTorch-style padding on each row side
+ * @param pad_w          PyTorch-style padding on each column side
  * @param input_scale    Scale used to quantize input
  * @param weight_scale   Scale used to quantize weights
  * @param offset         Zero point offset for output
@@ -227,27 +228,14 @@ static inline void conv2d_nhwc_int8(
     const int8_t* filt, int k_h, int k_w, int out_c,
     const float* bias,
     int stride_h, int stride_w,
-    int pad_same,
+    int pad_h, int pad_w,
     float input_scale,
     float weight_scale,
     int offset,
     int8_t* out)
 {
-    // Calculate output dimensions
-    int out_h, out_w;
-    if (pad_same) {
-        out_h = (in_h + stride_h - 1) / stride_h;
-        out_w = (in_w + stride_w - 1) / stride_w;
-    } else {
-        out_h = (in_h - k_h) / stride_h + 1;
-        out_w = (in_w - k_w) / stride_w + 1;
-    }
-    
-    // Calculate padding
-    int pad_h_total = pad_same ? ((out_h - 1) * stride_h + k_h - in_h) : 0;
-    int pad_w_total = pad_same ? ((out_w - 1) * stride_w + k_w - in_w) : 0;
-    int pad_top = pad_h_total / 2;
-    int pad_left = pad_w_total / 2;
+    int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
+    int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
     
     // Combined scale for dequantization
     float combined_scale = input_scale * weight_scale;
@@ -259,11 +247,11 @@ static inline void conv2d_nhwc_int8(
                 int32_t acc = 0;
                 
                 for (int kh = 0; kh < k_h; ++kh) {
-                    int ih = oh * stride_h + kh - pad_top;
+                    int ih = oh * stride_h + kh - pad_h;
                     if (ih < 0 || ih >= in_h) continue;
                     
                     for (int kw = 0; kw < k_w; ++kw) {
-                        int iw = ow * stride_w + kw - pad_left;
+                        int iw = ow * stride_w + kw - pad_w;
                         if (iw < 0 || iw >= in_w) continue;
                         
                         // Input pixel: in[ih, iw, :]

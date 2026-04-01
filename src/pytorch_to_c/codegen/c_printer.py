@@ -708,13 +708,11 @@ class CPrinter:
                 # Assume NCHW from PyTorch
                 in_h, in_w = input_shape[2], input_shape[3]
         
-        # Determine padding mode
-        pad_same = 1 if p_h > 0 or p_w > 0 else 0
-        
+        # PyTorch-style symmetric padding (pad per side)
         lines.append(
             f"conv2d_nhwc({input_buffer}, {in_h}, {in_w}, {in_channels}, "
             f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-            f"{bias_name}, {s_h}, {s_w}, {pad_same}, {output_buffer});"
+            f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, {output_buffer});"
         )
         
         return lines

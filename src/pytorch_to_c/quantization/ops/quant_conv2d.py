@@ -114,9 +114,6 @@ class StaticQuantConv2dNode(QuantIRNode):
         s_h, s_w = stride if isinstance(stride, (tuple, list)) else (stride, stride)
         p_h, p_w = padding if isinstance(padding, (tuple, list)) else (padding, padding)
         
-        # Determine padding mode
-        pad_same = 1 if p_h > 0 or p_w > 0 else 0
-        
         # Get input spatial dimensions from input shape
         in_h, in_w = 32, 32  # Default
         if self.inputs and self.inputs[0].output_shape:
@@ -129,7 +126,7 @@ class StaticQuantConv2dNode(QuantIRNode):
                 f"conv2d_nhwc_int8("
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-                f"{bias_name}, {s_h}, {s_w}, {pad_same}, "
+                f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
                 f"{self.input_scale}f, {self.weight_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
@@ -138,7 +135,7 @@ class StaticQuantConv2dNode(QuantIRNode):
                 f"conv2d_nhwc_int16("
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-                f"{bias_name}, {s_h}, {s_w}, {pad_same}, "
+                f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
                 f"{self.input_scale}f, {self.weight_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
@@ -252,8 +249,6 @@ class DynamicQuantConv2dNode(QuantIRNode):
         s_h, s_w = stride if isinstance(stride, (tuple, list)) else (stride, stride)
         p_h, p_w = padding if isinstance(padding, (tuple, list)) else (padding, padding)
         
-        pad_same = 1 if p_h > 0 or p_w > 0 else 0
-        
         # Get input scale variable from DynamicQuantizeInputNode
         input_scale_var = self._get_input_scale_variable(c_printer)
         
@@ -269,7 +264,7 @@ class DynamicQuantConv2dNode(QuantIRNode):
                 f"conv2d_nhwc_int8("
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-                f"{bias_name}, {s_h}, {s_w}, {pad_same}, "
+                f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
                 f"{input_scale_var}, {self.weight_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
@@ -278,7 +273,7 @@ class DynamicQuantConv2dNode(QuantIRNode):
                 f"conv2d_nhwc_int16("
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-                f"{bias_name}, {s_h}, {s_w}, {pad_same}, "
+                f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
                 f"{input_scale_var}, {self.weight_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )

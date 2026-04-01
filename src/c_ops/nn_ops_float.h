@@ -12,43 +12,32 @@
 // Clamp helper
 static inline int clamp_int(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// Conv2D (NHWC input, HWIO filters)
+// Conv2D (NHWC input, HWIO filters) — matches PyTorch Conv2d padding
 // in:  [H, W, C_in]
 // filt:[K_h, K_w, C_in, C_out]
 // bias:[C_out]
 // out: [H_out, W_out, C_out]
-// Stride: (stride_h, stride_w), Padding: SAME or VALID (string)
+// pad_h, pad_w: zero-padding added to each side (height/width), same as nn.Conv2d padding=
 static inline void conv2d_nhwc(
     const float* in, int in_h, int in_w, int in_c,
     const float* filt, int k_h, int k_w, int out_c,
     const float* bias,
     int stride_h, int stride_w,
-    int pad_same, // 1 for SAME, 0 for VALID
+    int pad_h, int pad_w,
     float* out)
 {
-    int out_h, out_w;
-    if (pad_same) {
-        out_h = (in_h + stride_h - 1) / stride_h;
-        out_w = (in_w + stride_w - 1) / stride_w;
-    } else {
-        out_h = (in_h - k_h) / stride_h + 1;
-        out_w = (in_w - k_w) / stride_w + 1;
-    }
-
-    int pad_h_total = pad_same ? ((out_h - 1) * stride_h + k_h - in_h) : 0;
-    int pad_w_total = pad_same ? ((out_w - 1) * stride_w + k_w - in_w) : 0;
-    int pad_top = pad_h_total / 2;
-    int pad_left = pad_w_total / 2;
+    int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
+    int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
 
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             for (int oc = 0; oc < out_c; ++oc) {
                 float acc = bias ? bias[oc] : 0.0f;
                 for (int kh = 0; kh < k_h; ++kh) {
-                    int ih = oh * stride_h + kh - pad_top;
+                    int ih = oh * stride_h + kh - pad_h;
                     if (ih < 0 || ih >= in_h) continue;
                     for (int kw = 0; kw < k_w; ++kw) {
-                        int iw = ow * stride_w + kw - pad_left;
+                        int iw = ow * stride_w + kw - pad_w;
                         if (iw < 0 || iw >= in_w) continue;
                         const float* in_px = in + ((ih * in_w + iw) * in_c);
                         const float* f_base = filt + (((kh * k_w + kw) * in_c) * out_c + oc);
