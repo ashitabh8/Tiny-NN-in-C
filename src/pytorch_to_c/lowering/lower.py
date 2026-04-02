@@ -170,6 +170,32 @@ class Lowering:
         self.node_map[fx_node] = ir_node
         return ir_node
     
+    @staticmethod
+    def _normalize_conv2d_padding(module: torch.nn.Conv2d) -> Tuple[int, int]:
+        """Normalize Conv2d padding to (pad_h, pad_w)."""
+        padding = module.padding
+        if isinstance(padding, str):
+            padding_lower = padding.lower()
+            if padding_lower == "valid":
+                return (0, 0)
+            if padding_lower == "same":
+                # Approximation for stride-aware SAME padding (symmetric part only).
+                kh, kw = module.kernel_size
+                sh, sw = module.stride
+                dh, dw = module.dilation
+                eff_kh = (kh - 1) * dh + 1
+                eff_kw = (kw - 1) * dw + 1
+                pad_h_total = max(eff_kh - sh, 0)
+                pad_w_total = max(eff_kw - sw, 0)
+                return (pad_h_total // 2, pad_w_total // 2)
+            raise ValueError(f"Unsupported Conv2d padding string: {padding}")
+        if isinstance(padding, int):
+            return (padding, padding)
+        if isinstance(padding, tuple):
+            if len(padding) == 2:
+                return (int(padding[0]), int(padding[1]))
+        raise ValueError(f"Unsupported Conv2d padding format: {padding}")
+
     def _lower_conv2d(
         self,
         fx_node: fx.Node,
@@ -180,8 +206,17 @@ class Lowering:
         weight = module.weight.detach().cpu().numpy()
         bias = module.bias.detach().cpu().numpy() if module.bias is not None else None
         
-        # Convert from PyTorch format [out_c, in_c, k_h, k_w] to HWIO [k_h, k_w, in_c, out_c]
-        weight_hwio = np.transpose(weight, (2, 3, 1, 0))
+        groups = int(module.groups)
+        in_channels = int(module.in_channels)
+        out_channels = int(module.out_channels)
+        is_depthwise = groups > 1 and groups == in_channels and out_channels == in_channels
+
+        # Standard: [out_c, in_c, k_h, k_w] -> [k_h, k_w, in_c, out_c]
+        # Depthwise (groups==in==out): [c, 1, k_h, k_w] -> [k_h, k_w, c]
+        if is_depthwise:
+            weight_hwio = np.transpose(weight[:, 0, :, :], (1, 2, 0))
+        else:
+            weight_hwio = np.transpose(weight, (2, 3, 1, 0))
         
         # Store parameters
         weight_name = f"{fx_node.name}_weight"
@@ -200,9 +235,11 @@ class Lowering:
                 'bias_name': f"{fx_node.name}_bias" if bias is not None else None,
                 'kernel_size': module.kernel_size,
                 'stride': module.stride,
-                'padding': module.padding,
-                'in_channels': module.in_channels,
-                'out_channels': module.out_channels,
+                'padding': self._normalize_conv2d_padding(module),
+                'padding_mode': str(module.padding),
+                'in_channels': in_channels,
+                'out_channels': out_channels,
+                'groups': groups,
             }
         )
         return ir_node
@@ -336,6 +373,8 @@ class Lowering:
             'add': 'add',
             'mul': 'mul',
             'relu': 'relu',
+            'getattr': 'method_getattr',
+            'getitem': 'method_getitem',
         }
         
         op_type = op_map.get(func_name, func_name)

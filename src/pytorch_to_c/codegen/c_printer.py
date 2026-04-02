@@ -369,7 +369,13 @@ class CPrinter:
     
     def _has_buffer(self, node: IRNode) -> bool:
         """True if this node produces an output buffer (not input or method_size)."""
-        return node.op_type not in ('input', 'method_size')
+        shape_only_ops = {'method_size', 'method_getattr', 'method_getitem'}
+        if node.op_type in shape_only_ops:
+            return False
+        if node.op_type == 'mul' and node.output_shape is None:
+            # FX shape arithmetic (e.g., C * S for reshape args) has no tensor buffer.
+            return False
+        return node.op_type != 'input'
 
     def _has_profiling_nodes(self) -> bool:
         """True if the graph contains any ProfilingWrapperNode (needs time.h, stdio.h)."""
@@ -559,7 +565,7 @@ class CPrinter:
         for node in self.ir_graph.nodes:
             if node.op_type == 'input':
                 continue
-            if node.op_type == 'method_size':
+            if not self._has_buffer(node):
                 continue  # scalar int, no buffer
 
             # First priority: use inferred shape if available
@@ -597,12 +603,30 @@ class CPrinter:
                 if not node.inputs or not node.inputs[0].output_shape or len(node.inputs[0].output_shape) != 4:
                     raise ValueError(f"{node.name} (adaptive_avg_pool): need input with 4D shape [B,C,H,W]; run with example_input for shape inference")
                 sizes[node.name] = node.inputs[0].output_shape[1]
-            elif node.op_type in ('method_view', 'method_flatten'):
+            elif node.op_type in (
+                'method_view',
+                'method_flatten',
+                'method_reshape',
+                'method_unsqueeze',
+                'method_squeeze',
+                'method_permute',
+            ):
                 if not node.inputs:
                     raise ValueError(f"{node.name} ({node.op_type}): no input node")
                 input_size = self._node_buffer_size(sizes, node.inputs[0])
                 if input_size is None:
                     raise ValueError(f"{node.name} ({node.op_type}): input shape unknown; run with example_input for shape inference")
+                sizes[node.name] = input_size
+            elif node.op_type in ('method_getattr', 'method_getitem'):
+                continue
+            elif node.op_type == 'mul':
+                if node.output_shape is None:
+                    continue
+                if not node.inputs:
+                    raise ValueError(f"{node.name} (mul): no input node")
+                input_size = self._node_buffer_size(sizes, node.inputs[0])
+                if input_size is None:
+                    raise ValueError(f"{node.name} (mul): input shape unknown; run with example_input for shape inference")
                 sizes[node.name] = input_size
             else:
                 raise ValueError(f"{node.name}: unknown op_type '{node.op_type}' and no output_shape; run with example_input for shape inference")
@@ -677,11 +701,23 @@ class CPrinter:
         elif node.op_type == 'adaptive_avg_pool':
             return self._generate_adaptive_avg_pool(node)
 
-        elif node.op_type in ('method_view', 'method_flatten'):
+        elif node.op_type in ('method_view', 'method_flatten', 'method_reshape'):
             return self._generate_flatten_or_view(node)
 
-        elif node.op_type == 'method_size':
+        elif node.op_type == 'method_unsqueeze':
+            return self._generate_unsqueeze(node)
+
+        elif node.op_type == 'method_squeeze':
+            return self._generate_squeeze(node)
+
+        elif node.op_type == 'method_permute':
+            return self._generate_permute(node)
+
+        elif node.op_type in ('method_size', 'method_getattr', 'method_getitem'):
             return []  # scalar integer, no buffer
+
+        elif node.op_type == 'mul' and node.output_shape is None:
+            return []  # shape arithmetic only
 
         else:
             return [f"// Unsupported operation: {node.op_type}"]
@@ -701,6 +737,7 @@ class CPrinter:
         padding = node.metadata['padding']
         in_channels = node.metadata['in_channels']
         out_channels = node.metadata['out_channels']
+        groups = node.metadata['groups'] if 'groups' in node.metadata else 1
         
         # Convert to scalars if tuples
         k_h, k_w = kernel_size if isinstance(kernel_size, (tuple, list)) else (kernel_size, kernel_size)
@@ -716,12 +753,25 @@ class CPrinter:
                 # Assume NCHW from PyTorch
                 in_h, in_w = input_shape[2], input_shape[3]
         
-        # PyTorch-style symmetric padding (pad per side)
-        lines.append(
-            f"conv2d_nhwc({input_buffer}, {in_h}, {in_w}, {in_channels}, "
-            f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-            f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, {output_buffer});"
-        )
+        if groups > 1:
+            if groups != in_channels or out_channels != in_channels:
+                raise ValueError(
+                    f"{node.name}: grouped conv is only supported for depthwise "
+                    f"(groups==in_channels==out_channels), got groups={groups}, "
+                    f"in_channels={in_channels}, out_channels={out_channels}"
+                )
+            lines.append(
+                f"depthwise_conv2d_nhwc({input_buffer}, {in_h}, {in_w}, {in_channels}, "
+                f"{weight_name}, {k_h}, {k_w}, {bias_name}, "
+                f"{s_h}, {s_w}, {p_h}, {p_w}, {output_buffer});"
+            )
+        else:
+            # PyTorch-style symmetric padding (pad per side)
+            lines.append(
+                f"conv2d_nhwc({input_buffer}, {in_h}, {in_w}, {in_channels}, "
+                f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
+                f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, {output_buffer});"
+            )
         
         return lines
     
@@ -737,10 +787,29 @@ class CPrinter:
         in_features = node.metadata['in_features']
         out_features = node.metadata['out_features']
         
-        lines.append(
-            f"dense({input_buffer}, {in_features}, "
-            f"{weight_name}, {bias_name}, {out_features}, {output_buffer});"
-        )
+        rows = 1
+        if node.inputs and node.inputs[0].output_shape is not None:
+            shape = list(node.inputs[0].output_shape)
+            if len(shape) > 0 and shape[0] == 1:
+                shape = shape[1:]
+            total = 1
+            for dim in shape:
+                total *= dim
+            if in_features > 0 and total % in_features == 0:
+                rows = total // in_features
+
+        if rows == 1:
+            lines.append(
+                f"dense({input_buffer}, {in_features}, "
+                f"{weight_name}, {bias_name}, {out_features}, {output_buffer});"
+            )
+        else:
+            lines.append(f"for (int r = 0; r < {rows}; ++r) {{")
+            lines.append(
+                f"    dense({input_buffer} + r * {in_features}, {in_features}, "
+                f"{weight_name}, {bias_name}, {out_features}, {output_buffer} + r * {out_features});"
+            )
+            lines.append("}")
         
         return lines
     
@@ -828,11 +897,11 @@ class CPrinter:
         
         # Get the dimensions to reduce over from metadata
         # kwargs contains {'dim': [2, 3]} for tensor.mean(dim=[2, 3])
-        kwargs = node.metadata.get('kwargs', {})
+        kwargs = node.metadata['kwargs'] if 'kwargs' in node.metadata else {}
         args = node.metadata.get('args', ())
         
         # dim can be in kwargs or as first positional arg
-        dim = kwargs.get('dim', None)
+        dim = kwargs['dim'] if 'dim' in kwargs else None
         if dim is None and args:
             dim = args[0] if isinstance(args[0], (list, tuple, int)) else [2, 3]
         if dim is None:
@@ -842,6 +911,17 @@ class CPrinter:
         input_node = node.inputs[0] if node.inputs else None
         if input_node and input_node.output_shape:
             input_shape = input_node.output_shape
+            shape_no_batch = list(input_shape)
+            if len(shape_no_batch) > 0 and shape_no_batch[0] == 1:
+                shape_no_batch = shape_no_batch[1:]
+
+            # Handle mean over the last dim, e.g. [B, C, I] -> [B, C]
+            if isinstance(dim, int) and dim == -1 and len(shape_no_batch) == 2:
+                rows, cols = shape_no_batch
+                lines.append("/* Mean over last dimension */")
+                lines.append(f"mean_last_dim({input_buffer}, {rows}, {cols}, {output_buffer});")
+                return lines
+
             # Remove batch dimension if present
             if len(input_shape) == 4 and input_shape[0] == 1:
                 # NCHW format in PyTorch: [1, C, H, W]
@@ -889,6 +969,142 @@ class CPrinter:
         buffer_sizes = self._calculate_buffer_sizes()
         size = buffer_sizes[node.name]
         lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
+        return lines
+
+    def _generate_unsqueeze(self, node: IRNode) -> List[str]:
+        """
+        Generate code for unsqueeze.
+        For [C, I] -> [C, I, 1], convert row-major [C, I] into NHWC-friendly [I, 1, C].
+        Other cases fallback to memcpy.
+        """
+        lines = []
+        input_buffer = self._get_input_buffer(node, 0)
+        output_buffer = self._get_buffer_name(node)
+
+        in_shape = list(node.inputs[0].output_shape) if node.inputs and node.inputs[0].output_shape else []
+        out_shape = list(node.output_shape) if node.output_shape else []
+        if len(in_shape) > 0 and in_shape[0] == 1:
+            in_shape = in_shape[1:]
+        if len(out_shape) > 0 and out_shape[0] == 1:
+            out_shape = out_shape[1:]
+
+        if len(in_shape) == 2 and len(out_shape) == 3 and out_shape[-1] == 1:
+            c, i = in_shape
+            lines.append("/* unsqueeze(-1): [C, I] -> NHWC [I, 1, C] */")
+            lines.append(f"for (int ii = 0; ii < {i}; ++ii) {{")
+            lines.append(f"    for (int cc = 0; cc < {c}; ++cc) {{")
+            lines.append(
+                f"        {output_buffer}[(ii * {c}) + cc] = {input_buffer}[(cc * {i}) + ii];"
+            )
+            lines.append("    }")
+            lines.append("}")
+            return lines
+
+        buffer_sizes = self._calculate_buffer_sizes()
+        size = buffer_sizes[node.name]
+        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
+        return lines
+
+    def _generate_squeeze(self, node: IRNode) -> List[str]:
+        """
+        Generate code for squeeze.
+        For [C, I, 1] -> [C, I], convert NHWC [I, 1, C] into row-major [C, I].
+        Other cases fallback to memcpy.
+        """
+        lines = []
+        input_buffer = self._get_input_buffer(node, 0)
+        output_buffer = self._get_buffer_name(node)
+
+        in_shape = list(node.inputs[0].output_shape) if node.inputs and node.inputs[0].output_shape else []
+        out_shape = list(node.output_shape) if node.output_shape else []
+        if len(in_shape) > 0 and in_shape[0] == 1:
+            in_shape = in_shape[1:]
+        if len(out_shape) > 0 and out_shape[0] == 1:
+            out_shape = out_shape[1:]
+
+        if len(in_shape) == 3 and len(out_shape) == 2 and in_shape[-1] == 1:
+            c, i, _ = in_shape
+            lines.append("/* squeeze(-1): NHWC [I, 1, C] -> [C, I] */")
+            lines.append(f"for (int cc = 0; cc < {c}; ++cc) {{")
+            lines.append(f"    for (int ii = 0; ii < {i}; ++ii) {{")
+            lines.append(
+                f"        {output_buffer}[(cc * {i}) + ii] = {input_buffer}[(ii * {c}) + cc];"
+            )
+            lines.append("    }")
+            lines.append("}")
+            return lines
+
+        buffer_sizes = self._calculate_buffer_sizes()
+        size = buffer_sizes[node.name]
+        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
+        return lines
+
+    def _generate_permute(self, node: IRNode) -> List[str]:
+        """Generate code for tensor permute using generic 4D permutation."""
+        lines = []
+        input_buffer = self._get_input_buffer(node, 0)
+        output_buffer = self._get_buffer_name(node)
+
+        input_node = node.inputs[0] if node.inputs else None
+        if input_node is None or input_node.output_shape is None:
+            raise ValueError(f"{node.name} (method_permute): missing input shape")
+
+        raw_shape = list(input_node.output_shape)
+        perm_args = list(node.metadata['args'])
+        if len(perm_args) == 1 and isinstance(perm_args[0], (tuple, list)):
+            perm_args = list(perm_args[0])
+
+        # Special-case NCHW->(B,H,C,W) when source buffer is NHWC from conv/bn/relu.
+        if len(raw_shape) == 4 and raw_shape[0] == 1 and perm_args == [0, 2, 1, 3]:
+            c = raw_shape[1]
+            h = raw_shape[2]
+            w = raw_shape[3]
+            lines.append("/* permute(0,2,1,3): source NHWC [H,W,C] -> [H,C,W] */")
+            lines.append(f"for (int hh = 0; hh < {h}; ++hh) {{")
+            lines.append(f"    for (int cc = 0; cc < {c}; ++cc) {{")
+            lines.append(f"        for (int ww = 0; ww < {w}; ++ww) {{")
+            lines.append(
+                f"            {output_buffer}[((hh * {c} + cc) * {w}) + ww] = "
+                f"{input_buffer}[((hh * {w} + ww) * {c}) + cc];"
+            )
+            lines.append("        }")
+            lines.append("    }")
+            lines.append("}")
+            return lines
+
+        # Runtime buffers are batch-stripped when B==1, so adapt perm accordingly.
+        if len(raw_shape) > 0 and raw_shape[0] == 1 and 0 in perm_args:
+            dims = raw_shape[1:]
+            perm = [int(p) - 1 for p in perm_args if int(p) != 0]
+        else:
+            dims = raw_shape
+            perm = [int(p) for p in perm_args]
+
+        if len(dims) == 0:
+            raise ValueError(f"{node.name} (method_permute): invalid empty input shape")
+        if len(perm) != len(dims):
+            raise ValueError(
+                f"{node.name} (method_permute): perm rank mismatch, perm={perm_args}, shape={raw_shape}"
+            )
+
+        while len(dims) < 4:
+            dims.append(1)
+
+        used = set(perm)
+        for axis in range(4):
+            if axis not in used:
+                perm.append(axis)
+                used.add(axis)
+            if len(perm) == 4:
+                break
+
+        if len(perm) != 4:
+            raise ValueError(f"{node.name} (method_permute): failed to build 4D perm from {perm_args}")
+
+        lines.append(
+            f"permute_4d({input_buffer}, {dims[0]}, {dims[1]}, {dims[2]}, {dims[3]}, "
+            f"{perm[0]}, {perm[1]}, {perm[2]}, {perm[3]}, {output_buffer});"
+        )
         return lines
 
     def _get_buffer_name(self, node: IRNode, slot_assignments: Optional[Dict[str, int]] = None) -> str:
