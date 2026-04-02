@@ -108,30 +108,14 @@ static inline void dequantize_int8_to_float(
  * ============================================================================ */
 
 /**
- * Quantized dense (linear) layer - int8 weights, float32 bias
- * 
- * Formula: y = W * x + b
- * 
- * The computation is done in integer accumulation, then converted to float
- * for bias addition, then quantized back to int8.
- * 
- * @param x           Input int8 array [in_features]
- * @param in_features Number of input features
- * @param W           Weight int8 array [in_features * out_features] (row-major)
- * @param b           Bias float array [out_features] (or NULL)
- * @param out_features Number of output features
- * @param scale       Quantization scale for output
- * @param offset      Zero point offset for output
- * @param y           Output int8 array [out_features]
- */
-/**
  * Quantized dense (linear) layer - int8
- * 
+ *
  * Computes: y = W * x + b
- * 
+ *
  * Uses int32 accumulator, then dequantizes using input_scale * weight_scale,
- * adds float bias, and requantizes output.
- * 
+ * adds float bias, and requantizes output with output_scale (must match the
+ * scale used by a following dequantize step, e.g. StaticQuantRule output_scale).
+ *
  * @param x             Input int8 array [in_features]
  * @param in_features   Number of input features
  * @param W             Weight int8 array [in_features * out_features] (row-major)
@@ -139,6 +123,7 @@ static inline void dequantize_int8_to_float(
  * @param out_features  Number of output features
  * @param input_scale   Scale used to quantize input
  * @param weight_scale  Scale used to quantize weights
+ * @param output_scale  Scale for output int8 (requantization)
  * @param offset        Zero point offset for output
  * @param y             Output int8 array [out_features]
  */
@@ -150,28 +135,28 @@ static inline void dense_int8(
     int out_features,
     float input_scale,
     float weight_scale,
+    float output_scale,
     int offset,
     int8_t* y)
 {
     for (int o = 0; o < out_features; ++o) {
         // Integer accumulation
         int32_t acc = 0;
-        
+
         for (int i = 0; i < in_features; ++i) {
             // W is stored as [in_features, out_features] row-major
             acc += (int32_t)x[i] * (int32_t)W[i * out_features + o];
         }
-        
+
         // Dequantize: result = acc * input_scale * weight_scale
         float result = (float)acc * input_scale * weight_scale;
-        
+
         // Add bias (float32)
         if (b != NULL) {
             result += b[o];
         }
-        
-        // Quantize output using weight_scale
-        y[o] = quantize_scalar_int8(result, weight_scale, offset);
+
+        y[o] = quantize_scalar_int8(result, output_scale, offset);
     }
 }
 
@@ -216,9 +201,11 @@ static inline void relu_int8(int8_t* x, int size) {
  * @param bias           Bias float array [C_out] (or NULL)
  * @param stride_h       Stride height
  * @param stride_w       Stride width
- * @param pad_same       1 for SAME padding, 0 for VALID
+ * @param pad_h          PyTorch-style padding on each row side
+ * @param pad_w          PyTorch-style padding on each column side
  * @param input_scale    Scale used to quantize input
  * @param weight_scale   Scale used to quantize weights
+ * @param output_scale   Scale for output int8 (requantization)
  * @param offset         Zero point offset for output
  * @param out            Output int8 array [H_out, W_out, C_out]
  */
@@ -227,27 +214,15 @@ static inline void conv2d_nhwc_int8(
     const int8_t* filt, int k_h, int k_w, int out_c,
     const float* bias,
     int stride_h, int stride_w,
-    int pad_same,
+    int pad_h, int pad_w,
     float input_scale,
     float weight_scale,
+    float output_scale,
     int offset,
     int8_t* out)
 {
-    // Calculate output dimensions
-    int out_h, out_w;
-    if (pad_same) {
-        out_h = (in_h + stride_h - 1) / stride_h;
-        out_w = (in_w + stride_w - 1) / stride_w;
-    } else {
-        out_h = (in_h - k_h) / stride_h + 1;
-        out_w = (in_w - k_w) / stride_w + 1;
-    }
-    
-    // Calculate padding
-    int pad_h_total = pad_same ? ((out_h - 1) * stride_h + k_h - in_h) : 0;
-    int pad_w_total = pad_same ? ((out_w - 1) * stride_w + k_w - in_w) : 0;
-    int pad_top = pad_h_total / 2;
-    int pad_left = pad_w_total / 2;
+    int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
+    int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
     
     // Combined scale for dequantization
     float combined_scale = input_scale * weight_scale;
@@ -259,11 +234,11 @@ static inline void conv2d_nhwc_int8(
                 int32_t acc = 0;
                 
                 for (int kh = 0; kh < k_h; ++kh) {
-                    int ih = oh * stride_h + kh - pad_top;
+                    int ih = oh * stride_h + kh - pad_h;
                     if (ih < 0 || ih >= in_h) continue;
                     
                     for (int kw = 0; kw < k_w; ++kw) {
-                        int iw = ow * stride_w + kw - pad_left;
+                        int iw = ow * stride_w + kw - pad_w;
                         if (iw < 0 || iw >= in_w) continue;
                         
                         // Input pixel: in[ih, iw, :]
@@ -287,10 +262,112 @@ static inline void conv2d_nhwc_int8(
                     result += bias[oc];
                 }
                 
-                // Quantize output
-                out[((oh * out_w + ow) * out_c) + oc] = quantize_scalar_int8(result, weight_scale, offset);
+                out[((oh * out_w + ow) * out_c) + oc] =
+                    quantize_scalar_int8(result, output_scale, offset);
             }
         }
+    }
+}
+
+/* ============================================================================
+ * Quantized Reductions / Pooling / View Helpers
+ * ============================================================================ */
+
+/**
+ * Mean over spatial dimensions (H, W) for NHWC int8 input.
+ *
+ * Dequantize domain:
+ *   mean_float = (sum(q) * input_scale) / (H*W)
+ * Requantize:
+ *   out_q = quantize(mean_float, output_scale, offset)
+ */
+static inline void mean_hwc_int8(
+    const int8_t* in,
+    int h,
+    int w,
+    int c,
+    float input_scale,
+    float output_scale,
+    int offset,
+    int8_t* out)
+{
+    int n = h * w;
+    for (int ch = 0; ch < c; ++ch) {
+        int32_t acc = 0;
+        for (int ih = 0; ih < h; ++ih) {
+            for (int iw = 0; iw < w; ++iw) {
+                acc += (int32_t)in[((ih * w + iw) * c) + ch];
+            }
+        }
+        float mean_val = (n > 0) ? ((float)acc * input_scale / (float)n) : 0.0f;
+        out[ch] = quantize_scalar_int8(mean_val, output_scale, offset);
+    }
+}
+
+/**
+ * Mean over the last dimension of a 2D int8 tensor [rows, cols] -> [rows].
+ */
+static inline void mean_last_dim_int8(
+    const int8_t* in,
+    int rows,
+    int cols,
+    float input_scale,
+    float output_scale,
+    int offset,
+    int8_t* out)
+{
+    for (int r = 0; r < rows; ++r) {
+        int32_t acc = 0;
+        const int8_t* row = in + r * cols;
+        for (int c = 0; c < cols; ++c) {
+            acc += (int32_t)row[c];
+        }
+        float mean_val = (cols > 0) ? ((float)acc * input_scale / (float)cols) : 0.0f;
+        out[r] = quantize_scalar_int8(mean_val, output_scale, offset);
+    }
+}
+
+/**
+ * GlobalAveragePool2D over H and W for NHWC int8 input.
+ * Thin wrapper around mean_hwc_int8.
+ */
+static inline void global_average_pool_2d_int8(
+    const int8_t* in,
+    int h,
+    int w,
+    int c,
+    float input_scale,
+    float output_scale,
+    int offset,
+    int8_t* out)
+{
+    mean_hwc_int8(in, h, w, c, input_scale, output_scale, offset, out);
+}
+
+/**
+ * AdaptiveAvgPool2d((1,1)) equivalent for int8 NHWC input.
+ */
+static inline void adaptive_avg_pool_2d_1x1_int8(
+    const int8_t* in,
+    int in_h,
+    int in_w,
+    int in_c,
+    float input_scale,
+    float output_scale,
+    int offset,
+    int8_t* out)
+{
+    global_average_pool_2d_int8(
+        in, in_h, in_w, in_c, input_scale, output_scale, offset, out
+    );
+}
+
+/**
+ * Flatten helper for int8 buffers (copy n elements).
+ */
+static inline void flatten_int8(const int8_t* src, int n, int8_t* dst) {
+    for (int i = 0; i < n; ++i) {
+        dst[i] = src[i];
     }
 }
 

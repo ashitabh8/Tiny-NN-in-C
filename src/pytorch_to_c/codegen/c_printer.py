@@ -366,6 +366,17 @@ class CPrinter:
         All IRNodes now have get_c_dtype() which maps dtype -> C type.
         """
         return node.get_c_dtype()
+
+    def _get_sizeof_expr(self, node: IRNode) -> str:
+        """Return C sizeof() expression matching a node buffer dtype."""
+        c_dtype = self._get_buffer_dtype(node)
+        if c_dtype == "int8_t":
+            return "sizeof(int8_t)"
+        if c_dtype == "int16_t":
+            return "sizeof(int16_t)"
+        if c_dtype == "int32_t":
+            return "sizeof(int32_t)"
+        return "sizeof(float)"
     
     def _has_buffer(self, node: IRNode) -> bool:
         """True if this node produces an output buffer (not input or method_size)."""
@@ -546,7 +557,7 @@ class CPrinter:
             if output_node is not None and node.name == output_node.name:
                 size = buffer_sizes[node.name]
                 buf_name = self._get_buffer_name(node)
-                lines.append(base_indent + f"memcpy(output, {buf_name}, {size} * sizeof(float));")
+                lines.append(base_indent + f"memcpy(output, {buf_name}, {size} * {self._get_sizeof_expr(node)});")
 
         self._slot_assignments = None  # clear so other code paths don't use stale slots
         lines.append("}")
@@ -860,7 +871,7 @@ class CPrinter:
         buffer_sizes = self._calculate_buffer_sizes()
         size = buffer_sizes.get(node.name, 10)  # Fall back to 10 if not found
         
-        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
+        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * {self._get_sizeof_expr(node)});")
         lines.append(f"softmax({output_buffer}, {size});")
         
         return lines
@@ -919,7 +930,16 @@ class CPrinter:
             if isinstance(dim, int) and dim == -1 and len(shape_no_batch) == 2:
                 rows, cols = shape_no_batch
                 lines.append("/* Mean over last dimension */")
-                lines.append(f"mean_last_dim({input_buffer}, {rows}, {cols}, {output_buffer});")
+                if node.dtype == "int8":
+                    input_scale = node.metadata.get("input_scale", 1.0)
+                    output_scale = node.metadata.get("output_scale", 1.0)
+                    output_offset = node.metadata.get("output_offset", 0)
+                    lines.append(
+                        f"mean_last_dim_int8({input_buffer}, {rows}, {cols}, "
+                        f"{input_scale}f, {output_scale}f, {output_offset}, {output_buffer});"
+                    )
+                else:
+                    lines.append(f"mean_last_dim({input_buffer}, {rows}, {cols}, {output_buffer});")
                 return lines
 
             # Remove batch dimension if present
@@ -933,7 +953,16 @@ class CPrinter:
                     # This is global average pooling over H, W
                     # Our C code uses NHWC, so input is [H, W, C]
                     lines.append(f"// Mean over spatial dimensions (global average pool)")
-                    lines.append(f"mean_hwc({input_buffer}, {h}, {w}, {c}, {output_buffer});")
+                    if node.dtype == "int8":
+                        input_scale = node.metadata.get("input_scale", 1.0)
+                        output_scale = node.metadata.get("output_scale", 1.0)
+                        output_offset = node.metadata.get("output_offset", 0)
+                        lines.append(
+                            f"mean_hwc_int8({input_buffer}, {h}, {w}, {c}, "
+                            f"{input_scale}f, {output_scale}f, {output_offset}, {output_buffer});"
+                        )
+                    else:
+                        lines.append(f"mean_hwc({input_buffer}, {h}, {w}, {c}, {output_buffer});")
                 else:
                     lines.append(f"// TODO: Mean over dims {dim} not yet implemented")
             else:
@@ -956,9 +985,18 @@ class CPrinter:
         h, w, c = 32, 32, 64  # defaults
         if node.inputs and node.inputs[0].output_shape and len(node.inputs[0].output_shape) == 4:
             _, c, h, w = node.inputs[0].output_shape
-        lines.append(
-            f"global_average_pool_2d({input_buffer}, {h}, {w}, {c}, {output_buffer});"
-        )
+        if node.dtype == "int8":
+            input_scale = node.metadata.get("input_scale", 1.0)
+            output_scale = node.metadata.get("output_scale", 1.0)
+            output_offset = node.metadata.get("output_offset", 0)
+            lines.append(
+                f"global_average_pool_2d_int8({input_buffer}, {h}, {w}, {c}, "
+                f"{input_scale}f, {output_scale}f, {output_offset}, {output_buffer});"
+            )
+        else:
+            lines.append(
+                f"global_average_pool_2d({input_buffer}, {h}, {w}, {c}, {output_buffer});"
+            )
         return lines
 
     def _generate_flatten_or_view(self, node: IRNode) -> List[str]:
@@ -968,7 +1006,7 @@ class CPrinter:
         output_buffer = self._get_buffer_name(node)
         buffer_sizes = self._calculate_buffer_sizes()
         size = buffer_sizes[node.name]
-        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
+        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * {self._get_sizeof_expr(node)});")
         return lines
 
     def _generate_unsqueeze(self, node: IRNode) -> List[str]:
@@ -1002,7 +1040,7 @@ class CPrinter:
 
         buffer_sizes = self._calculate_buffer_sizes()
         size = buffer_sizes[node.name]
-        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
+        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * {self._get_sizeof_expr(node)});")
         return lines
 
     def _generate_squeeze(self, node: IRNode) -> List[str]:
@@ -1036,7 +1074,7 @@ class CPrinter:
 
         buffer_sizes = self._calculate_buffer_sizes()
         size = buffer_sizes[node.name]
-        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));")
+        lines.append(f"memcpy({output_buffer}, {input_buffer}, {size} * {self._get_sizeof_expr(node)});")
         return lines
 
     def _generate_permute(self, node: IRNode) -> List[str]:

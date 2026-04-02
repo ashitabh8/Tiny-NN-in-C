@@ -269,5 +269,107 @@ static inline void conv2d_nhwc_int8(
     }
 }
 
+/* ============================================================================
+ * Quantized Reductions / Pooling / View Helpers
+ * ============================================================================ */
+
+/**
+ * Mean over spatial dimensions (H, W) for NHWC int8 input.
+ *
+ * Dequantize domain:
+ *   mean_float = (sum(q) * input_scale) / (H*W)
+ * Requantize:
+ *   out_q = quantize(mean_float, output_scale, offset)
+ */
+static inline void mean_hwc_int8(
+    const int8_t* in,
+    int h,
+    int w,
+    int c,
+    float input_scale,
+    float output_scale,
+    int offset,
+    int8_t* out)
+{
+    int n = h * w;
+    for (int ch = 0; ch < c; ++ch) {
+        int32_t acc = 0;
+        for (int ih = 0; ih < h; ++ih) {
+            for (int iw = 0; iw < w; ++iw) {
+                acc += (int32_t)in[((ih * w + iw) * c) + ch];
+            }
+        }
+        float mean_val = (n > 0) ? ((float)acc * input_scale / (float)n) : 0.0f;
+        out[ch] = quantize_scalar_int8(mean_val, output_scale, offset);
+    }
+}
+
+/**
+ * Mean over the last dimension of a 2D int8 tensor [rows, cols] -> [rows].
+ */
+static inline void mean_last_dim_int8(
+    const int8_t* in,
+    int rows,
+    int cols,
+    float input_scale,
+    float output_scale,
+    int offset,
+    int8_t* out)
+{
+    for (int r = 0; r < rows; ++r) {
+        int32_t acc = 0;
+        const int8_t* row = in + r * cols;
+        for (int c = 0; c < cols; ++c) {
+            acc += (int32_t)row[c];
+        }
+        float mean_val = (cols > 0) ? ((float)acc * input_scale / (float)cols) : 0.0f;
+        out[r] = quantize_scalar_int8(mean_val, output_scale, offset);
+    }
+}
+
+/**
+ * GlobalAveragePool2D over H and W for NHWC int8 input.
+ * Thin wrapper around mean_hwc_int8.
+ */
+static inline void global_average_pool_2d_int8(
+    const int8_t* in,
+    int h,
+    int w,
+    int c,
+    float input_scale,
+    float output_scale,
+    int offset,
+    int8_t* out)
+{
+    mean_hwc_int8(in, h, w, c, input_scale, output_scale, offset, out);
+}
+
+/**
+ * AdaptiveAvgPool2d((1,1)) equivalent for int8 NHWC input.
+ */
+static inline void adaptive_avg_pool_2d_1x1_int8(
+    const int8_t* in,
+    int in_h,
+    int in_w,
+    int in_c,
+    float input_scale,
+    float output_scale,
+    int offset,
+    int8_t* out)
+{
+    global_average_pool_2d_int8(
+        in, in_h, in_w, in_c, input_scale, output_scale, offset, out
+    );
+}
+
+/**
+ * Flatten helper for int8 buffers (copy n elements).
+ */
+static inline void flatten_int8(const int8_t* src, int n, int8_t* dst) {
+    for (int i = 0; i < n; ++i) {
+        dst[i] = src[i];
+    }
+}
+
 #endif /* NN_OPS_INT8_H_ */
 
