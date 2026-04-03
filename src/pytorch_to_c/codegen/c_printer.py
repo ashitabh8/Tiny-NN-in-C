@@ -410,11 +410,11 @@ class CPrinter:
         order: List[IRNode],
         buffer_sizes: Dict[str, int],
         last_use: Dict[str, IRNode],
-    ) -> Tuple[Dict[str, int], Dict[int, int], int]:
+    ) -> Tuple[Dict[str, int], Dict[int, int], Dict[int, str], int]:
         """
         Assign each buffer-producing node to a reusable slot using interval graph coloring.
         Relu nodes are skipped (they share their input's slot, in-place).
-        Returns (slot_assignments, slot_sizes, num_slots).
+        Returns (slot_assignments, slot_sizes, slot_dtypes, num_slots).
         """
         order_index = {n.name: i for i, n in enumerate(order)}
 
@@ -441,8 +441,8 @@ class CPrinter:
                 relu_last_idx = order_index[lu_relu.name]
                 last_use_idx[inp.name] = max(last_use_idx[inp.name], relu_last_idx)
 
-        # Build list of (node_name, def_idx, last_use_idx, size) for slot assignment
-        intervals: List[Tuple[str, int, int, int]] = []
+        # Build list of (node_name, def_idx, last_use_idx, size, c_dtype) for slot assignment
+        intervals: List[Tuple[str, int, int, int, str]] = []
         for node in order:
             if node.op_type in ('input', 'method_size', 'relu'):
                 continue
@@ -451,7 +451,8 @@ class CPrinter:
             def_idx = order_index[node.name]
             lu_idx = last_use_idx[node.name]
             size = buffer_sizes.get(node.name, 1024)
-            intervals.append((node.name, def_idx, lu_idx, size))
+            c_dtype = self._get_buffer_dtype(node)
+            intervals.append((node.name, def_idx, lu_idx, size, c_dtype))
 
         intervals.sort(key=lambda x: x[1])  # sort by def_idx
 
@@ -459,22 +460,24 @@ class CPrinter:
         slot_assignments: Dict[str, int] = {}
         slot_last_use: Dict[int, int] = {}
         slot_sizes: Dict[int, int] = {}
+        slot_dtypes: Dict[int, str] = {}
 
-        for node_name, def_idx, lu_idx, size in intervals:
+        for node_name, def_idx, lu_idx, size, c_dtype in intervals:
             found_slot = None
             for slot_id in sorted(slot_last_use.keys()):
-                if slot_last_use[slot_id] < def_idx:
+                if slot_last_use[slot_id] < def_idx and slot_dtypes[slot_id] == c_dtype:
                     found_slot = slot_id
                     break
             if found_slot is None:
                 found_slot = len(slot_last_use)
                 slot_last_use[found_slot] = -1
+                slot_dtypes[found_slot] = c_dtype
             slot_assignments[node_name] = found_slot
             slot_last_use[found_slot] = lu_idx
             slot_sizes[found_slot] = max(slot_sizes.get(found_slot, 0), size)
 
         num_slots = len(slot_sizes)
-        return slot_assignments, slot_sizes, num_slots
+        return slot_assignments, slot_sizes, slot_dtypes, num_slots
 
     def generate_model_c(self) -> str:
         """
@@ -520,7 +523,7 @@ class CPrinter:
         buffer_sizes = self._calculate_buffer_sizes()
         order = self.ir_graph.topological_sort()
         last_use = self._compute_buffer_last_use(order)
-        slot_assignments, slot_sizes, num_slots = self._assign_buffer_slots(order, buffer_sizes, last_use)
+        slot_assignments, slot_sizes, slot_dtypes, num_slots = self._assign_buffer_slots(order, buffer_sizes, last_use)
         self._slot_assignments = slot_assignments
         output_node = self.ir_graph.outputs[0] if self.ir_graph.outputs else None
 
@@ -537,7 +540,10 @@ class CPrinter:
 
         # Flat slot declarations at function top (no nesting)
         for slot_id in range(num_slots):
-            lines.append(base_indent + f"static float slot_{slot_id}[{slot_sizes[slot_id]}];")
+            lines.append(
+                base_indent
+                + f"static {slot_dtypes[slot_id]} slot_{slot_id}[{slot_sizes[slot_id]}];"
+            )
         if num_slots > 0:
             lines.append("")
 

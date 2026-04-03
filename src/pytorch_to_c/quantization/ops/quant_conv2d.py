@@ -7,6 +7,7 @@ Two separate classes for clarity:
 """
 
 from typing import List
+import numpy as np
 from ...ir.quant_node import QuantIRNode
 from ...ir.node import IRNode
 
@@ -108,6 +109,7 @@ class StaticQuantConv2dNode(QuantIRNode):
         padding = self.metadata['padding']
         in_channels = self.metadata['in_channels']
         out_channels = self.metadata['out_channels']
+        groups = self.metadata['groups'] if 'groups' in self.metadata else 1
         
         # Convert to scalars if tuples
         k_h, k_w = kernel_size if isinstance(kernel_size, (tuple, list)) else (kernel_size, kernel_size)
@@ -121,15 +123,44 @@ class StaticQuantConv2dNode(QuantIRNode):
             if len(input_shape) == 4:
                 in_h, in_w = input_shape[2], input_shape[3]
         
-        if self.dtype == 'int8':
+        is_depthwise = groups > 1 and groups == in_channels and out_channels == in_channels
+
+        if self.dtype == 'int8' and is_depthwise:
+            if not isinstance(self.weight_scale, (list, tuple, np.ndarray)):
+                raise ValueError(
+                    f"{self.name}: depthwise int8 quantization requires per-channel weight scales"
+                )
+            weight_scale_name = c_printer._sanitize_name(f"{self.metadata['weight_name']}_scale")
             lines.append(
-                f"conv2d_nhwc_int8("
+                f"depthwise_conv2d_nhwc_int8("
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
-                f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
+                f"{weight_name}, {k_h}, {k_w}, "
                 f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, {self.offset}, "
+                f"{self.input_scale}f, {weight_scale_name}, {self.output_scale}f, {self.offset}, "
                 f"{output_buffer});"
             )
+        elif self.dtype == 'int8':
+            if isinstance(self.weight_scale, (list, tuple, np.ndarray)):
+                weight_scale_name = c_printer._sanitize_name(f"{self.metadata['weight_name']}_scale")
+                lines.append(
+                    f"conv2d_nhwc_int8_per_channel("
+                    f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
+                    f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
+                    f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+                    f"{self.input_scale}f, {weight_scale_name}, {self.output_scale}f, {self.offset}, "
+                    f"{output_buffer});"
+                )
+            else:
+                lines.append(
+                    f"conv2d_nhwc_int8("
+                    f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
+                    f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
+                    f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+                    f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, {self.offset}, "
+                    f"{output_buffer});"
+                )
+        elif self.dtype == 'int16' and is_depthwise:
+            raise ValueError(f"{self.name}: depthwise int16 kernel is not implemented")
         elif self.dtype == 'int16':
             lines.append(
                 f"conv2d_nhwc_int16("
@@ -243,6 +274,7 @@ class DynamicQuantConv2dNode(QuantIRNode):
         padding = self.metadata['padding']
         in_channels = self.metadata['in_channels']
         out_channels = self.metadata['out_channels']
+        groups = self.metadata['groups'] if 'groups' in self.metadata else 1
         
         # Convert to scalars if tuples
         k_h, k_w = kernel_size if isinstance(kernel_size, (tuple, list)) else (kernel_size, kernel_size)
@@ -259,6 +291,13 @@ class DynamicQuantConv2dNode(QuantIRNode):
             if len(input_shape) == 4:
                 in_h, in_w = input_shape[2], input_shape[3]
         
+        is_depthwise = groups > 1 and groups == in_channels and out_channels == in_channels
+
+        if self.dtype == 'int8' and is_depthwise:
+            raise ValueError(
+                f"{self.name}: dynamic depthwise conv2d requires per-channel weight scales; "
+                "use static quantization for this path"
+            )
         if self.dtype == 'int8':
             lines.append(
                 f"conv2d_nhwc_int8("
