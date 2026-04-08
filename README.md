@@ -2,16 +2,52 @@
 
 A source-to-source compiler that converts PyTorch `nn.Module` models into standalone, dependency-free C code targeting microcontrollers. Supports float32 and W8A8 (int8/int16) quantized inference. All generated C is header-only, portable, and uses zero dynamic allocation.
 
+## Contents
+
+- [Getting Started](#getting-started)
+- [Design Philosophy](#design-philosophy)
+- [Supported PyTorch Operations](#supported-pytorch-operations)
+- [Quantization](#quantization)
+- [Arduino Support](#arduino-support)
+- [Verify Your Model](#verify-your-model)
+- [Examples](#examples)
+- [How to Extend](#how-to-extend)
+- [Input Layout](#input-layout)
+- [Testing](#testing)
+- [License](#license)
+
 ## Getting Started
 
-The full quick-start guide is being refreshed.
-
-For now:
+### Install
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+pip install -e .
+```
+
+### Run an end-to-end example
+
+```bash
 python examples/01_float_mnist/run.py
 ```
+
+### Verify generated C vs PyTorch
+
+```bash
+python -m tools.verify_model --model models/tiny_mlp.py:TinyMLP --input-shape 1,784 --num-samples 50
+```
+
+## Design Philosophy
+
+Tiny-NN-in-C is designed as a modular compiler pipeline, not a one-off model converter. The core goal is to make optimization and code generation policies easy to swap without rewriting the system.
+
+- **Policy over hardcoding**: quantization and instrumentation are expressed as rule + transform passes, so new schemes can be added by defining rules rather than editing the core compiler flow.
+- **Composable graph rewrites**: transforms operate on an IR graph with explicit rewiring, pre/post node insertion, and validation. This makes independent passes easier to combine safely.
+- **Node-local behavior**: each IR node (especially quantized nodes) owns how it emits C and what conversion nodes it needs, enabling flexible replacement at the operation level.
+- **Backend replaceability**: code generation is separated from tracing/lowering logic, so different runtime targets (for example host C, Arduino-oriented output, or future backends) can be introduced with minimal front-end changes.
+- **Extensible by construction**: extension points are first-class (new op nodes, new transforms, new passes), so the system scales by adding modules instead of patching monolithic code.
 
 ## Supported PyTorch Operations
 
@@ -71,7 +107,10 @@ The generated sketch includes `setup()`/`loop()`, profiling via `micros()`, and 
 
 ## Verify Your Model
 
-Use the built-in verification tool to confirm the C output matches PyTorch:
+Use the built-in verification tool to confirm compiled C numerically matches PyTorch.  
+Verification is end-to-end: trace/lower the model, generate C, compile with `gcc`, run inference on random samples, and compare C vs PyTorch outputs with error metrics.
+
+### Float32 verification (CLI)
 
 ```bash
 python -m tools.verify_model \
@@ -80,12 +119,41 @@ python -m tools.verify_model \
   --num-samples 50
 ```
 
-Or from Python:
+### Float32 verification (Python API)
 
 ```python
 from tools.verify_model import verify_model
 
 results = verify_model(model, example_input, num_samples=50)
+print(results.summary())
+```
+
+### Int8 verification (Python API with quantization rules)
+
+```python
+from tools.verify_model import verify_model
+from src.pytorch_to_c.quantization import StaticQuantRule
+
+rules = [
+    StaticQuantRule(
+        pattern=r".*fc.*",
+        dtype="int8",
+        input_scale=0.05,
+        input_offset=0,
+        weight_scale=0.02,
+        weight_offset=0,
+        output_scale=0.05,
+        output_offset=0,
+    )
+]
+
+results = verify_model(
+    model,
+    example_input,
+    num_samples=50,
+    quantization_rules=rules,
+    tolerance=5.0,  # quantized paths usually need looser tolerance
+)
 print(results.summary())
 ```
 
