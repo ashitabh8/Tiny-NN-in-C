@@ -201,11 +201,19 @@ MIT
 
 ## Roadmap
 
+### Current Highlights (Already Implemented)
+
+- Activation memory optimization is already in place: codegen does liveness-aware buffer slot reuse via interval graph coloring, and ReLU reuses input buffers in-place.
+- Generated inference is static and MCU-friendly: header-only C output with zero dynamic allocation.
+- End-to-end verification exists today: generated C is compiled and numerically checked against PyTorch with error metrics.
+
+### Next Priorities
+
 Planned priorities for the next public iterations:
 
 - ARM CMSIS-NN backend for Conv/Linear/Depthwise kernels with backend selection at codegen time.
 - Arduino NOR flash codegen support: emit split weights metadata + loader stubs to stream parameters from external SPI/QSPI flash instead of SRAM.
-- Memory planning upgrades: activation lifetime analysis + static arena packing to reduce peak RAM.
+- Memory planning v2: global weight/activation placement planning with user-tunable SRAM/flash tradeoffs and explicit peak-memory reports.
 - More quantization coverage: per-channel `Linear`, int16 activations for sensitive layers, and calibration utilities for post-training quantization.
 - Model compatibility expansion: add lowering/codegen support for common ops used in MobileNet-like and small transformer-style blocks (for example `layernorm`, `matmul`, `sigmoid`).
 - Backend portability: first-class STM32 and ESP32 target presets with toolchain flags, timing hooks, and example projects.
