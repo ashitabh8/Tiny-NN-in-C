@@ -1,6 +1,12 @@
 """Quantization module for PyTorch to C compiler"""
 
-from .rules import QuantRule, StaticQuantRule, DynamicQuantRuleMinMaxPerTensor
+from .rules import (
+    QuantRule,
+    StaticQuantRule,
+    DynamicQuantRuleMinMaxPerTensor,
+    QATStaticDepthwiseConvRule,
+    QATStaticPointwiseConvRule,
+)
 from .rule_matcher import RuleMatcher
 from .graph_transform import QuantizationTransform
 from .ops.quant_utils import QuantizeNode, DequantizeNode, DynamicQuantizeInputNode
@@ -11,6 +17,8 @@ __all__ = [
     'QuantRule',
     'StaticQuantRule', 
     'DynamicQuantRuleMinMaxPerTensor',
+    'QATStaticDepthwiseConvRule',
+    'QATStaticPointwiseConvRule',
     'RuleMatcher',
     'QuantizationTransform',
     'QuantizeNode',

@@ -429,6 +429,60 @@ static void test_relu_int8(void) {
     printf("  test_relu_int8 PASS\n");
 }
 
+/* -------------------------------------------------------------------------- */
+/* Reduction / pooling / flatten int8 helpers                                 */
+/* -------------------------------------------------------------------------- */
+
+static void test_mean_hwc_int8(void) {
+    int8_t in[] = {
+        1, 3,
+        5, 7,
+        2, 4,
+        6, 8
+    }; /* h=2,w=2,c=2 */
+    int8_t out[2];
+    mean_hwc_int8(in, 2, 2, 2, 1.0f, 1.0f, 0, out);
+    /* channel means: [ (1+5+2+6)/4=3.5 -> 4, (3+7+4+8)/4=5.5 -> 6 ] */
+    assert(out[0] == 4);
+    assert(out[1] == 6);
+    printf("  test_mean_hwc_int8 PASS\n");
+}
+
+static void test_mean_last_dim_int8(void) {
+    int8_t in[] = {
+        2, 4, 6,
+        -3, 0, 3
+    }; /* rows=2, cols=3 */
+    int8_t out[2];
+    mean_last_dim_int8(in, 2, 3, 1.0f, 1.0f, 0, out);
+    /* means: [4, 0] */
+    assert(out[0] == 4);
+    assert(out[1] == 0);
+    printf("  test_mean_last_dim_int8 PASS\n");
+}
+
+static void test_global_average_pool_2d_int8(void) {
+    int8_t in[] = {
+        1, 2,
+        3, 4,
+        5, 6,
+        7, 8
+    }; /* h=2,w=2,c=2 */
+    int8_t out_a[2], out_b[2];
+    global_average_pool_2d_int8(in, 2, 2, 2, 1.0f, 1.0f, 0, out_a);
+    mean_hwc_int8(in, 2, 2, 2, 1.0f, 1.0f, 0, out_b);
+    assert(out_a[0] == out_b[0] && out_a[1] == out_b[1]);
+    printf("  test_global_average_pool_2d_int8 PASS\n");
+}
+
+static void test_flatten_int8(void) {
+    int8_t src[] = {-3, 10, 11, -2, 7};
+    int8_t dst[5] = {0, 0, 0, 0, 0};
+    flatten_int8(src, 5, dst);
+    assert(memcmp(src, dst, sizeof(src)) == 0);
+    printf("  test_flatten_int8 PASS\n");
+}
+
 int main(void) {
     printf("Running nn_ops_int8 tests...\n");
     test_quantize_scalar_int8();
@@ -448,6 +502,10 @@ int main(void) {
     test_conv2d_int8_stride2();
     test_conv2d_int8_output_scale();
     test_relu_int8();
+    test_mean_hwc_int8();
+    test_mean_last_dim_int8();
+    test_global_average_pool_2d_int8();
+    test_flatten_int8();
     printf("All nn_ops_int8 tests PASS.\n");
     return 0;
 }

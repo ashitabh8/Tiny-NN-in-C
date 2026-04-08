@@ -168,7 +168,28 @@ class StaticQuantRule(QuantRule):
         Returns:
             Quantized weights as int8 or int16 numpy array
         """
-        weights_q = np.round(weights / self.weight_scale) + self.weight_offset
+        scale = self.weight_scale
+        if isinstance(scale, np.ndarray):
+            if scale.ndim != 1:
+                raise ValueError("Per-channel weight_scale must be a 1D array")
+            if scale.shape[0] != weights.shape[-1]:
+                raise ValueError(
+                    f"Per-channel weight_scale length ({scale.shape[0]}) does not match "
+                    f"weight output channels ({weights.shape[-1]})"
+                )
+            scale = scale.reshape(*([1] * (weights.ndim - 1)), scale.shape[0])
+        elif isinstance(scale, (list, tuple)):
+            scale = np.asarray(scale, dtype=np.float32)
+            if scale.ndim != 1:
+                raise ValueError("Per-channel weight_scale must be a 1D list/tuple")
+            if scale.shape[0] != weights.shape[-1]:
+                raise ValueError(
+                    f"Per-channel weight_scale length ({scale.shape[0]}) does not match "
+                    f"weight output channels ({weights.shape[-1]})"
+                )
+            scale = scale.reshape(*([1] * (weights.ndim - 1)), scale.shape[0])
+
+        weights_q = np.round(weights / scale) + self.weight_offset
         
         if self.dtype == 'int8':
             weights_q = np.clip(weights_q, -128, 127).astype(np.int8)
@@ -195,6 +216,63 @@ class StaticQuantRule(QuantRule):
         return (f"StaticQuantRule(pattern='{self.pattern}', dtype='{self.dtype}', "
                 f"input_scale={self.input_scale}, weight_scale={self.weight_scale}, "
                 f"output_scale={self.output_scale})")
+
+
+class QATStaticDepthwiseConvRule(StaticQuantRule):
+    """
+    QAT-semantics static quantization for depthwise conv:
+    float -> int8 quantize at block input, then int8-depthwise -> float output.
+    """
+
+    def create_quant_node(self, node):
+        if node.op_type != "conv2d":
+            raise ValueError(
+                f"QATStaticDepthwiseConvRule supports only conv2d, got {node.op_type}"
+            )
+        from .ops.quant_conv2d_qat_semantic import StaticQuantDepthwiseConv2dFloatOutNode
+
+        return StaticQuantDepthwiseConv2dFloatOutNode(
+            original_node=node,
+            quant_dtype=self.dtype,
+            input_scale=self.input_scale,
+            weight_scale=self.weight_scale,
+            offset=self.input_offset,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"QATStaticDepthwiseConvRule(pattern='{self.pattern}', dtype='{self.dtype}', "
+            f"input_scale={self.input_scale}, weight_scale={self.weight_scale})"
+        )
+
+
+class QATStaticPointwiseConvRule(StaticQuantRule):
+    """
+    QAT-semantics static quantization for pointwise conv:
+    float input + int8 weights -> float output.
+    """
+
+    def create_quant_node(self, node):
+        if node.op_type != "conv2d":
+            raise ValueError(
+                f"QATStaticPointwiseConvRule supports only conv2d, got {node.op_type}"
+            )
+        from .ops.quant_conv2d_qat_semantic import (
+            StaticQuantPointwiseConv2dFloatInFloatOutNode,
+        )
+
+        return StaticQuantPointwiseConv2dFloatInFloatOutNode(
+            original_node=node,
+            quant_dtype=self.dtype,
+            weight_scale=self.weight_scale,
+            offset=self.input_offset,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"QATStaticPointwiseConvRule(pattern='{self.pattern}', dtype='{self.dtype}', "
+            f"weight_scale={self.weight_scale})"
+        )
 
 
 class DynamicQuantRuleMinMaxPerTensor(QuantRule):
