@@ -15,6 +15,7 @@ A source-to-source compiler that converts PyTorch `nn.Module` models into standa
 - [Input Layout](#input-layout)
 - [Testing](#testing)
 - [License](#license)
+- [Roadmap](#roadmap)
 
 ## Getting Started
 
@@ -197,3 +198,17 @@ pytest test/test_verify_harness.py -v  # verification harness (requires gcc)
 ## License
 
 MIT
+
+## Roadmap
+
+Planned priorities for the next public iterations:
+
+- ARM CMSIS-NN backend for Conv/Linear/Depthwise kernels with backend selection at codegen time.
+- Arduino NOR flash codegen support: emit split weights metadata + loader stubs to stream parameters from external SPI/QSPI flash instead of SRAM.
+- Memory planning upgrades: activation lifetime analysis + static arena packing to reduce peak RAM.
+- More quantization coverage: per-channel `Linear`, int16 activations for sensitive layers, and calibration utilities for post-training quantization.
+- Model compatibility expansion: add lowering/codegen support for common ops used in MobileNet-like and small transformer-style blocks (for example `layernorm`, `matmul`, `sigmoid`).
+- Backend portability: first-class STM32 and ESP32 target presets with toolchain flags, timing hooks, and example projects.
+- Better deployment artifacts: optional generated CMake project and board-ready templates (`main.c`, linker hints, memory map notes).
+- Verification + benchmarking suite: automated correctness/perf reports across float/int8/int16 on host and selected MCUs.
+- Developer ergonomics: richer error messages in lowering/quantization passes and a debug mode to dump per-pass IR snapshots.
