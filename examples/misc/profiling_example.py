@@ -23,7 +23,7 @@ import torch.nn as nn
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from src.pytorch_to_c.compiler import compile_model
 from src.pytorch_to_c.codegen.c_printer import CPrinter

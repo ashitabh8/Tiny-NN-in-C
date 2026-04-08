@@ -130,16 +130,16 @@ print(results.summary())
 
 ## Examples
 
+Each example is a self-contained, end-to-end script: train (if needed), compile to C, and verify against PyTorch.
+
 | Example | Description |
 |---------|-------------|
-| `examples/tiny_mlp.py` | Simplest: MLP to float C |
-| `examples/tiny_resnet.py` | ResNet1D with static int8 quantization |
-| `examples/tiny_mixed_net.py` | Conv + Linear + Softmax |
-| `examples/quantized_mlp.py` | Fine-grained per-layer quantization |
-| `examples/dynamic_quantization.py` | Dynamic min-max per-tensor |
-| `examples/example_op_no_op.py` | FuseDequantQuantPass optimization demo |
-| `examples/profiling_example.py` | Profiling transform demo |
-| `examples/mnist_cnn.py` | MNIST training + compilation |
+| `examples/01_float_mnist/run.py` | Train MNIST CNN, compile to float C, verify |
+| `examples/02_dynamic_quantization/per_tensor.py` | Dynamic per-tensor int8 quantization + verify |
+| `examples/02_dynamic_quantization/per_channel.py` | Dynamic per-channel int8 quantization + verify |
+| `examples/03_qat_resnet/run.py` | QAT training on TinyResNet1D, compile quantized C, verify |
+| `examples/misc/profiling_example.py` | Profiling transform demo |
+| `examples/misc/fuse_dequant_quant_demo.py` | FuseDequantQuantPass optimization demo |
 
 ## How to Extend
 

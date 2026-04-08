@@ -4,6 +4,7 @@ from .rules import (
     QuantRule,
     StaticQuantRule,
     DynamicQuantRuleMinMaxPerTensor,
+    DynamicQuantRuleMinMaxPerChannel,
     StaticDepthwiseConvRule,
     StaticPointwiseConvRule,
     QATStaticDepthwiseConvRule,   # backwards-compatible alias
@@ -19,6 +20,7 @@ __all__ = [
     'QuantRule',
     'StaticQuantRule', 
     'DynamicQuantRuleMinMaxPerTensor',
+    'DynamicQuantRuleMinMaxPerChannel',
     'StaticDepthwiseConvRule',
     'StaticPointwiseConvRule',
     'QATStaticDepthwiseConvRule',

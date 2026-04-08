@@ -3,10 +3,11 @@ Graph Transformation - Apply quantization rules to IR graph
 """
 
 from typing import List, Dict, Optional
+import numpy as np
 from ..ir.graph import IRGraph
 from ..ir.node import IRNode
 from ..ir.quant_node import QuantIRNode
-from .rules import QuantRule, DynamicQuantRuleMinMaxPerTensor
+from .rules import QuantRule
 from .rule_matcher import RuleMatcher
 from .ops.quant_utils import QuantizeNode, DequantizeNode
 
@@ -99,8 +100,8 @@ class QuantizationTransform:
         """
         for node, rule in nodes_to_quantize.items():
             try:
-                # For dynamic rules, need to provide weights
-                if isinstance(rule, DynamicQuantRuleMinMaxPerTensor):
+                # Dynamic rules auto-compute scales from weights
+                if hasattr(rule, 'create_quant_node_with_weights'):
                     weight_name = node.metadata.get('weight_name')
                     if weight_name and weight_name in ir_graph.parameters:
                         weights = ir_graph.parameters[weight_name]
@@ -343,8 +344,13 @@ class QuantizationTransform:
                 weights_q = rule.quantize_weights(weights_float)
                 
                 # Replace in parameters (only store quantized, not float)
-                # Use same name (simpler than changing metadata)
                 ir_graph.parameters[weight_name] = weights_q
+
+                # Store per-channel weight scale arrays so they appear in weights.h
+                ws = getattr(node, 'weight_scale', None)
+                if ws is not None and isinstance(ws, (list, tuple, np.ndarray)):
+                    scale_name = f"{weight_name}_scale"
+                    ir_graph.parameters[scale_name] = np.asarray(ws, dtype=np.float32)
     
     def _validate_graph(self, ir_graph: IRGraph):
         """

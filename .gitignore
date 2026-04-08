@@ -42,7 +42,9 @@ generated/
 *.out
 test_model
 
-# MNIST training artifacts
+# MNIST training artifacts / example outputs
+examples/*/generated*/
+examples/*/*.pth
 examples/mnist_cnn_weights.pth
 data/
 

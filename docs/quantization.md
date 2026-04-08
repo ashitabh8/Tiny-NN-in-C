@@ -86,6 +86,23 @@ rules = [
 
 No calibration data needed -- the compiler inspects the weights and computes optimal scale/offset automatically.
 
+### Dynamic Quantization (`DynamicQuantRuleMinMaxPerChannel`)
+
+Like `DynamicQuantRuleMinMaxPerTensor`, but computes a separate scale for each output channel. This is typically more accurate because channels with small weight magnitudes get a tighter scale.
+
+```python
+from src.pytorch_to_c.quantization import DynamicQuantRuleMinMaxPerChannel
+
+rules = [
+    DynamicQuantRuleMinMaxPerChannel(
+        pattern=r'.*conv.*',
+        dtype='int8',
+    ),
+]
+```
+
+Also requires no calibration data. See `examples/02_dynamic_quantization/per_channel.py` for a full end-to-end example.
+
 ### Per-Channel Static Quantization (Depthwise / Pointwise)
 
 For depthwise-separable blocks (e.g., DeepSense-style DS-DW architectures), two dedicated rules support per-channel weight scales:
