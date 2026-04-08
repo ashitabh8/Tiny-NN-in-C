@@ -86,6 +86,51 @@ rules = [
 
 No calibration data needed -- the compiler inspects the weights and computes optimal scale/offset automatically.
 
+### QAT-Semantic Quantization (Per-Channel Weights)
+
+For depthwise-separable blocks (e.g., DeepSense-style DS-DW architectures), two QAT-semantic rules mirror the behavior of quantization-aware training:
+
+```python
+from src.pytorch_to_c.quantization import (
+    QATStaticDepthwiseConvRule,
+    QATStaticPointwiseConvRule,
+)
+
+# Per-channel weight scales (one per output channel)
+dw_weight_scales = np.array([0.01, 0.015, 0.012, ...])  # shape [C]
+pw_weight_scales = np.array([0.02, 0.018, ...])          # shape [out_C]
+
+rules = [
+    QATStaticDepthwiseConvRule(
+        pattern=r'.*dw_conv.*',
+        dtype='int8',
+        input_scale=0.05,
+        input_offset=0,
+        weight_scale=dw_weight_scales,  # per-channel!
+        weight_offset=0,
+        output_scale=0.05,
+        output_offset=0,
+    ),
+    QATStaticPointwiseConvRule(
+        pattern=r'.*pw_conv.*',
+        dtype='int8',
+        input_scale=0.05,
+        input_offset=0,
+        weight_scale=pw_weight_scales,
+        weight_offset=0,
+        output_scale=0.05,
+        output_offset=0,
+    ),
+]
+```
+
+Key differences from standard `StaticQuantRule`:
+- **Depthwise rule**: quantizes input to int8, runs int8 depthwise conv with per-channel weight scales, outputs float (no output requantization).
+- **Pointwise rule**: takes float input, uses int8 weights with per-channel scales, outputs float.
+- Both use `StaticQuantRule.quantize_weights()` which supports per-channel `weight_scale` arrays.
+
+C kernels used: `depthwise_conv2d_nhwc_int8_to_float`, `conv2d_nhwc_float_input_int8_weight_per_channel`.
+
 ### Mixed Precision
 
 Different rules can target different layers with different dtypes:

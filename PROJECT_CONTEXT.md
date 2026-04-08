@@ -24,7 +24,8 @@ Tiny-NN-in-C/
 │   │   │   ├── c_printer.py       # IR → C code: model.c, model.h, weights.h
 │   │   │   └── ops_map.py         # IR op_type → C function name mapping
 │   │   ├── quantization/
-│   │   │   ├── rules.py           # QuantRule, StaticQuantRule, DynamicQuantRuleMinMaxPerTensor
+│   │   │   ├── rules.py           # QuantRule, StaticQuantRule, DynamicQuantRuleMinMaxPerTensor,
+│   │   │   │                      #   QATStaticDepthwiseConvRule, QATStaticPointwiseConvRule
 │   │   │   ├── rule_matcher.py    # First-match rule engine
 │   │   │   ├── graph_transform.py # QuantizationTransform: apply rules to IR
 │   │   │   └── ops/

@@ -56,16 +56,19 @@ arm-none-eabi-gcc -mcpu=cortex-m4 -O2 -c model.c -o model.o  # ARM Cortex-M
 
 | PyTorch module / function | Status |
 |---------------------------|--------|
-| `nn.Conv2d`               | float, int8, int16 |
+| `nn.Conv2d`               | float, int8, int16, int8 per-channel |
+| `nn.Conv2d` (depthwise)   | float, int8 per-channel |
 | `nn.Linear`               | float, int8, int16 |
 | `nn.ReLU`                 | float, int8, int16 |
 | `nn.BatchNorm2d`          | float |
 | `nn.Softmax`              | float |
-| `nn.AdaptiveAvgPool2d`    | float |
+| `nn.AdaptiveAvgPool2d`    | float, int8 |
 | `torch.add` / `+`         | float |
 | `torch.mul` / `*`         | float |
-| `tensor.view` / `flatten` | float |
-| `tensor.mean(dim=...)`    | float (spatial dims) |
+| `tensor.view` / `flatten` / `reshape` | float, int8 |
+| `tensor.mean(dim=...)`    | float, int8 (spatial + last dim) |
+| `tensor.unsqueeze` / `squeeze` | float |
+| `tensor.permute`          | float |
 
 ## Quantization
 
@@ -87,7 +90,13 @@ ir_graph = QuantizationTransform(rules).apply(ir_graph)
 CPrinter(ir_graph).generate_all("output_quant/")
 ```
 
-See [docs/quantization.md](docs/quantization.md) for the full guide including dynamic quantization, mixed precision, and how to add custom rules.
+For depthwise-separable blocks, QAT-semantic rules support per-channel weight scales:
+
+```python
+from src.pytorch_to_c.quantization import QATStaticDepthwiseConvRule, QATStaticPointwiseConvRule
+```
+
+See [docs/quantization.md](docs/quantization.md) for the full guide including dynamic quantization, per-channel QAT semantics, mixed precision, and how to add custom rules.
 
 ## Arduino Support
 
