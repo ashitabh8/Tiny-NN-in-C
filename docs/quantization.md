@@ -86,14 +86,14 @@ rules = [
 
 No calibration data needed -- the compiler inspects the weights and computes optimal scale/offset automatically.
 
-### QAT-Semantic Quantization (Per-Channel Weights)
+### Per-Channel Static Quantization (Depthwise / Pointwise)
 
-For depthwise-separable blocks (e.g., DeepSense-style DS-DW architectures), two QAT-semantic rules mirror the behavior of quantization-aware training:
+For depthwise-separable blocks (e.g., DeepSense-style DS-DW architectures), two dedicated rules support per-channel weight scales:
 
 ```python
 from src.pytorch_to_c.quantization import (
-    QATStaticDepthwiseConvRule,
-    QATStaticPointwiseConvRule,
+    StaticDepthwiseConvRule,
+    StaticPointwiseConvRule,
 )
 
 # Per-channel weight scales (one per output channel)
@@ -101,7 +101,7 @@ dw_weight_scales = np.array([0.01, 0.015, 0.012, ...])  # shape [C]
 pw_weight_scales = np.array([0.02, 0.018, ...])          # shape [out_C]
 
 rules = [
-    QATStaticDepthwiseConvRule(
+    StaticDepthwiseConvRule(
         pattern=r'.*dw_conv.*',
         dtype='int8',
         input_scale=0.05,
@@ -111,7 +111,7 @@ rules = [
         output_scale=0.05,
         output_offset=0,
     ),
-    QATStaticPointwiseConvRule(
+    StaticPointwiseConvRule(
         pattern=r'.*pw_conv.*',
         dtype='int8',
         input_scale=0.05,

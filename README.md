@@ -90,13 +90,13 @@ ir_graph = QuantizationTransform(rules).apply(ir_graph)
 CPrinter(ir_graph).generate_all("output_quant/")
 ```
 
-For depthwise-separable blocks, QAT-semantic rules support per-channel weight scales:
+For depthwise-separable blocks, per-channel rules support per-channel weight scales:
 
 ```python
-from src.pytorch_to_c.quantization import QATStaticDepthwiseConvRule, QATStaticPointwiseConvRule
+from src.pytorch_to_c.quantization import StaticDepthwiseConvRule, StaticPointwiseConvRule
 ```
 
-See [docs/quantization.md](docs/quantization.md) for the full guide including dynamic quantization, per-channel QAT semantics, mixed precision, and how to add custom rules.
+See [docs/quantization.md](docs/quantization.md) for the full guide including dynamic quantization, per-channel quantization, mixed precision, and how to add custom rules.
 
 ## Arduino Support
 

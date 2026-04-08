@@ -402,10 +402,10 @@ static inline void depthwise_conv2d_nhwc_int8(
 }
 
 /**
- * QAT-semantics depthwise Conv2D:
+ * Depthwise Conv2D with per-channel int8 weights and float output.
  * int8 input + int8 per-channel weights -> float output.
  *
- * This mirrors fake-quant block semantics where intermediate tensors remain float.
+ * Useful when downstream layers expect float activations (no output requantization).
  */
 static inline void depthwise_conv2d_nhwc_int8_to_float(
     const int8_t* in,
@@ -457,7 +457,7 @@ static inline void depthwise_conv2d_nhwc_int8_to_float(
 }
 
 /**
- * QAT-semantics pointwise/general Conv2D:
+ * Pointwise/general Conv2D with per-channel int8 weights and float I/O.
  * float input + int8 per-channel weights -> float output.
  */
 static inline void conv2d_nhwc_float_input_int8_weight_per_channel(

@@ -25,7 +25,7 @@ Tiny-NN-in-C/
 │   │   │   └── ops_map.py         # IR op_type → C function name mapping
 │   │   ├── quantization/
 │   │   │   ├── rules.py           # QuantRule, StaticQuantRule, DynamicQuantRuleMinMaxPerTensor,
-│   │   │   │                      #   QATStaticDepthwiseConvRule, QATStaticPointwiseConvRule
+│   │   │   │                      #   StaticDepthwiseConvRule, StaticPointwiseConvRule
 │   │   │   ├── rule_matcher.py    # First-match rule engine
 │   │   │   ├── graph_transform.py # QuantizationTransform: apply rules to IR
 │   │   │   └── ops/

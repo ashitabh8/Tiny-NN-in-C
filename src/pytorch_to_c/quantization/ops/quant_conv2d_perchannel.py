@@ -1,13 +1,11 @@
 """
-QAT-semantics quantized Conv2D nodes.
+Per-channel quantized Conv2D nodes for depthwise and pointwise convolutions.
 
-These nodes are additive alternatives to StaticQuantConv2dNode and are designed
-to mirror QAT training semantics for DS-DW blocks:
+These nodes are alternatives to StaticQuantConv2dNode that use per-channel
+weight scales and emit float outputs (no output requantization):
 
-- Depthwise: quantized activation input + int8 weights -> float output
-- Pointwise: float input + int8 weights -> float output
-
-Both nodes intentionally emit float outputs (no output requant/dequant node).
+- Depthwise: quantized int8 input + per-channel int8 weights -> float output
+- Pointwise: float input + per-channel int8 weights -> float output
 """
 
 from typing import List
@@ -32,7 +30,7 @@ class StaticQuantDepthwiseConv2dFloatOutNode(QuantIRNode):
             dtype="float32",
             scale=weight_scale,
             offset=offset,
-            quant_strategy="static_qat_semantic",
+            quant_strategy="static_perchannel",
         )
         self.quant_dtype = quant_dtype
         self.input_scale = input_scale
@@ -44,7 +42,7 @@ class StaticQuantDepthwiseConv2dFloatOutNode(QuantIRNode):
 
         if self.quant_dtype != "int8":
             raise ValueError(
-                f"{self.name}: only int8 is supported for QAT semantic depthwise conv"
+                f"{self.name}: only int8 is supported for per-channel depthwise conv"
             )
         quant_output_shape = None
         if "input_shape" in self.metadata:
@@ -75,7 +73,7 @@ class StaticQuantDepthwiseConv2dFloatOutNode(QuantIRNode):
     def generate_c_code(self, c_printer) -> List[str]:
         if self.quant_dtype != "int8":
             raise ValueError(
-                f"{self.name}: only int8 is supported for QAT semantic depthwise conv"
+                f"{self.name}: only int8 is supported for per-channel depthwise conv"
             )
         input_buffer = c_printer._get_input_buffer(self, 0)
         output_buffer = c_printer._get_buffer_name(self)
@@ -143,7 +141,7 @@ class StaticQuantPointwiseConv2dFloatInFloatOutNode(QuantIRNode):
             dtype="float32",
             scale=weight_scale,
             offset=offset,
-            quant_strategy="static_qat_semantic",
+            quant_strategy="static_perchannel",
         )
         self.quant_dtype = quant_dtype
         self.weight_scale = weight_scale
@@ -169,7 +167,7 @@ class StaticQuantPointwiseConv2dFloatInFloatOutNode(QuantIRNode):
     def generate_c_code(self, c_printer) -> List[str]:
         if self.quant_dtype != "int8":
             raise ValueError(
-                f"{self.name}: only int8 is supported for QAT semantic pointwise conv"
+                f"{self.name}: only int8 is supported for per-channel pointwise conv"
             )
         input_buffer = c_printer._get_input_buffer(self, 0)
         output_buffer = c_printer._get_buffer_name(self)

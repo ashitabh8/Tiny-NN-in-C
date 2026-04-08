@@ -218,18 +218,20 @@ class StaticQuantRule(QuantRule):
                 f"output_scale={self.output_scale})")
 
 
-class QATStaticDepthwiseConvRule(StaticQuantRule):
+class StaticDepthwiseConvRule(StaticQuantRule):
     """
-    QAT-semantics static quantization for depthwise conv:
+    Per-channel static quantization for depthwise conv:
     float -> int8 quantize at block input, then int8-depthwise -> float output.
+
+    Uses per-channel weight scales (one scale per channel).
     """
 
     def create_quant_node(self, node):
         if node.op_type != "conv2d":
             raise ValueError(
-                f"QATStaticDepthwiseConvRule supports only conv2d, got {node.op_type}"
+                f"StaticDepthwiseConvRule supports only conv2d, got {node.op_type}"
             )
-        from .ops.quant_conv2d_qat_semantic import StaticQuantDepthwiseConv2dFloatOutNode
+        from .ops.quant_conv2d_perchannel import StaticQuantDepthwiseConv2dFloatOutNode
 
         return StaticQuantDepthwiseConv2dFloatOutNode(
             original_node=node,
@@ -241,23 +243,27 @@ class QATStaticDepthwiseConvRule(StaticQuantRule):
 
     def __repr__(self) -> str:
         return (
-            f"QATStaticDepthwiseConvRule(pattern='{self.pattern}', dtype='{self.dtype}', "
+            f"StaticDepthwiseConvRule(pattern='{self.pattern}', dtype='{self.dtype}', "
             f"input_scale={self.input_scale}, weight_scale={self.weight_scale})"
         )
 
 
-class QATStaticPointwiseConvRule(StaticQuantRule):
+# Backwards-compatible alias
+QATStaticDepthwiseConvRule = StaticDepthwiseConvRule
+
+
+class StaticPointwiseConvRule(StaticQuantRule):
     """
-    QAT-semantics static quantization for pointwise conv:
-    float input + int8 weights -> float output.
+    Per-channel static quantization for pointwise (1x1) conv:
+    float input + per-channel int8 weights -> float output.
     """
 
     def create_quant_node(self, node):
         if node.op_type != "conv2d":
             raise ValueError(
-                f"QATStaticPointwiseConvRule supports only conv2d, got {node.op_type}"
+                f"StaticPointwiseConvRule supports only conv2d, got {node.op_type}"
             )
-        from .ops.quant_conv2d_qat_semantic import (
+        from .ops.quant_conv2d_perchannel import (
             StaticQuantPointwiseConv2dFloatInFloatOutNode,
         )
 
@@ -270,9 +276,13 @@ class QATStaticPointwiseConvRule(StaticQuantRule):
 
     def __repr__(self) -> str:
         return (
-            f"QATStaticPointwiseConvRule(pattern='{self.pattern}', dtype='{self.dtype}', "
+            f"StaticPointwiseConvRule(pattern='{self.pattern}', dtype='{self.dtype}', "
             f"weight_scale={self.weight_scale})"
         )
+
+
+# Backwards-compatible alias
+QATStaticPointwiseConvRule = StaticPointwiseConvRule
 
 
 class DynamicQuantRuleMinMaxPerTensor(QuantRule):
