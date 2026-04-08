@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytorch_to_c"
+version = "0.1.0"
+description = "PyTorch to C Compiler for Microcontrollers"
+authors = [{ name = "Tiny-NN-in-C Contributors" }]
+requires-python = ">=3.8"
+dependencies = [
+  "torch>=2.0.0",
+  "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.3.0",
+]
+mnist = [
+  "torchvision>=0.15.0",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

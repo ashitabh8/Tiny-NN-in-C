@@ -2,54 +2,15 @@
 
 A source-to-source compiler that converts PyTorch `nn.Module` models into standalone, dependency-free C code targeting microcontrollers. Supports float32 and W8A8 (int8/int16) quantized inference. All generated C is header-only, portable, and uses zero dynamic allocation.
 
-## Quick Start
+## Getting Started
 
-### Install
+The full quick-start guide is being refreshed.
+
+For now:
 
 ```bash
 pip install -r requirements.txt
-```
-
-### Compile a model
-
-```python
-import torch
-from src.pytorch_to_c.compiler import compile_model
-from models import TinyMLP
-
-model = TinyMLP()
-model.eval()
-example_input = torch.randn(1, 784)
-compile_model(model, example_input, output_dir="output/")
-```
-
-The generated `output/` directory is self-contained:
-
-```
-output/
-  model.h         # void model_forward(const float* input, float* output);
-  model.c         # implementation (slot-based buffer reuse)
-  weights.h       # static const arrays
-  nn_ops_float.h  # header-only C runtime kernels
-```
-
-### Use the generated C code
-
-```c
-#include "model.h"
-
-float input[784];
-float output[10];
-
-// fill input ...
-model_forward(input, output);
-```
-
-Compile for your target:
-
-```bash
-gcc -O2 -o model_test main.c model.c -lm              # host testing
-arm-none-eabi-gcc -mcpu=cortex-m4 -O2 -c model.c -o model.o  # ARM Cortex-M
+python examples/01_float_mnist/run.py
 ```
 
 ## Supported PyTorch Operations
