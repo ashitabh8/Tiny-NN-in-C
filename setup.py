@@ -4,8 +4,7 @@ setup(
     name="pytorch_to_c",
     version="0.1.0",
     description="PyTorch to C Compiler for Microcontrollers",
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="Tiny-NN-in-C Contributors",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     install_requires=[
@@ -16,7 +15,9 @@ setup(
         "dev": [
             "pytest>=7.3.0",
         ],
+        "mnist": [
+            "torchvision>=0.15.0",
+        ],
     },
     python_requires=">=3.8",
 )
-

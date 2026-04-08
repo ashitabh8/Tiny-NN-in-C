@@ -31,7 +31,7 @@ from src.pytorch_to_c.quantization import (
 )
 from src.passes import FuseDequantQuantPass
 
-from models.mixed_model_no_op_example import CustomMLP
+from models import CustomMLP
 
 
 def count_nodes_by_type(ir_graph):
@@ -116,7 +116,7 @@ def main():
     # Generate unoptimized code
     os.makedirs("tmp/generated_unoptimized", exist_ok=True)
     printer_before = CPrinter(quant_ir_unopt)
-    printer_before.generate_all("tmp/generated_unoptimized_123")
+    printer_before.generate_all("tmp/generated_unoptimized")
     print("\n📁 Generated unoptimized code: tmp/generated_unoptimized/")
     
     
@@ -151,7 +151,7 @@ def main():
     # Generate optimized code
     os.makedirs("tmp/generated_optimized", exist_ok=True)
     printer_after = CPrinter(optimized_ir)
-    printer_after.generate_all("tmp/generated_optimized_123")
+    printer_after.generate_all("tmp/generated_optimized")
     print("\n📁 Generated optimized code: tmp/generated_optimized/")
     
     # Summary

@@ -35,13 +35,17 @@ htmlcov/
 *.swo
 *~
 
-# Generated C code (except examples in generated/)
+# Generated / temporary output
 tmp/
+generated/
 *.o
 *.out
 test_model
 
+# MNIST training artifacts
+examples/mnist_cnn_weights.pth
+data/
+
 # OS
 .DS_Store
 Thumbs.db
-

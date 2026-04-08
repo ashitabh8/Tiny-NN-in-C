@@ -13,9 +13,6 @@ import numpy as np
 
 from ..ir.graph import IRGraph
 from ..ir.node import IRNode
-# Note: QuantIRNode and other quantized nodes implement generate_c_code()
-# for custom code generation. See _generate_node_code() for details.
-from .ops_map import OpMapping
 
 try:
     from ..profiling.ops.profiling_utils import ProfilingWrapperNode
@@ -677,6 +674,9 @@ class CPrinter:
         elif node.op_type == 'adaptive_avg_pool':
             return self._generate_adaptive_avg_pool(node)
 
+        elif node.op_type == 'mul':
+            return self._generate_mul(node)
+
         elif node.op_type in ('method_view', 'method_flatten'):
             return self._generate_flatten_or_view(node)
 
@@ -814,6 +814,19 @@ class CPrinter:
         
         return lines
     
+    def _generate_mul(self, node: IRNode) -> List[str]:
+        """Generate code for element-wise multiplication."""
+        lines = []
+        input_buffer_a = self._get_input_buffer(node, 0)
+        input_buffer_b = self._get_input_buffer(node, 1)
+        output_buffer = self._get_buffer_name(node)
+        buffer_sizes = self._calculate_buffer_sizes()
+        size = buffer_sizes.get(node.name, 1024)
+        lines.append(f"for (int i = 0; i < {size}; ++i) {{")
+        lines.append(f"    {output_buffer}[i] = {input_buffer_a}[i] * {input_buffer_b}[i];")
+        lines.append(f"}}")
+        return lines
+
     def _generate_mean(self, node: IRNode) -> List[str]:
         """
         Generate code for mean reduction over specified dimensions.

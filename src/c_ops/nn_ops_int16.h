@@ -5,12 +5,11 @@
  * Higher precision than int8, useful for output layers.
  */
 
-#ifndef NN_OPS_INT16_H
-#define NN_OPS_INT16_H
+#ifndef NN_OPS_INT16_H_
+#define NN_OPS_INT16_H_
 
 #include <stdint.h>
 #include <math.h>
-#include <string.h>
 
 /* ==========================================================================
  * Quantization/Dequantization Utilities
@@ -126,8 +125,8 @@ static inline void dense_int16(
     int16_t* y)
 {
     for (int o = 0; o < out_features; ++o) {
-        // Use int32 accumulator to prevent overflow
-        int32_t acc = 0;
+        // int16*int16 products can be up to 32767^2; use int64 to prevent overflow
+        int64_t acc = 0;
         for (int i = 0; i < in_features; ++i) {
             acc += (int32_t)x[i] * (int32_t)W[i * out_features + o];
         }
@@ -222,8 +221,8 @@ static inline void conv2d_nhwc_int16(
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             for (int oc = 0; oc < out_c; ++oc) {
-                // Integer accumulation
-                int32_t acc = 0;
+                // int16*int16 products can be up to 32767^2; use int64 to prevent overflow
+                int64_t acc = 0;
                 
                 for (int kh = 0; kh < k_h; ++kh) {
                     int ih = oh * stride_h + kh - pad_h;
@@ -233,11 +232,7 @@ static inline void conv2d_nhwc_int16(
                         int iw = ow * stride_w + kw - pad_w;
                         if (iw < 0 || iw >= in_w) continue;
                         
-                        // Input pixel: in[ih, iw, :]
                         const int16_t* in_px = in + ((ih * in_w + iw) * in_c);
-                        
-                        // Filter: filt[kh, kw, :, oc]
-                        // Layout: [K_h, K_w, C_in, C_out]
                         const int16_t* f_base = filt + (((kh * k_w + kw) * in_c) * out_c + oc);
                         
                         for (int ic = 0; ic < in_c; ++ic) {
@@ -246,7 +241,6 @@ static inline void conv2d_nhwc_int16(
                     }
                 }
                 
-                // Dequantize accumulated result
                 float result = (float)acc * combined_scale;
                 
                 // Add bias (float32)
@@ -261,5 +255,5 @@ static inline void conv2d_nhwc_int16(
     }
 }
 
-#endif /* NN_OPS_INT16_H */
+#endif /* NN_OPS_INT16_H_ */
 

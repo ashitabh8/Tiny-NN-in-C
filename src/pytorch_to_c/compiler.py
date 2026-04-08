@@ -2,7 +2,6 @@
 Main compiler entry point for PyTorch to C compilation
 """
 
-import os
 import torch
 from typing import Optional
 
@@ -119,7 +118,7 @@ class PyTorchToCCompiler:
     
     def _log(self, message: str) -> None:
         """Print a log message if verbose mode is enabled."""
-        if self.verbose or True:  # Always log for now
+        if self.verbose:
             print(message)
 
 

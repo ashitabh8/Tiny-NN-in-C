@@ -172,9 +172,9 @@ static inline void dense_int8(
  * @param x    Input/output int8 array
  * @param size Number of elements
  */
-static inline void relu_int8(int8_t* x, int size) {
+static inline void relu_int8(int8_t* x, int size, int offset) {
     for (int i = 0; i < size; i++) {
-        if (x[i] < 0) x[i] = 0;
+        if (x[i] < (int8_t)offset) x[i] = (int8_t)offset;
     }
 }
 

@@ -79,6 +79,7 @@ class FuseDequantQuantPass(IRPass):
         if self.stats['pairs_fused'] > 0:
             self._log(f"Total: Removed {self.stats['nodes_removed']} nodes")
         
+        ir_graph.rebuild_node_map()
         return ir_graph
     
     def _find_fusable_pairs(self, ir_graph: IRGraph) -> List[Tuple[DequantizeNode, IRNode]]:

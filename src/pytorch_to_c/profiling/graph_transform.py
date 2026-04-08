@@ -42,6 +42,7 @@ class ProfilingTransform:
             profiling_node = rule.create_profiling_node(node)
             self._replace_node(ir_graph, node, profiling_node)
 
+        ir_graph.rebuild_node_map()
         return ir_graph
 
     def _replace_node(self, ir_graph: IRGraph, old_node: IRNode, new_node: IRNode):

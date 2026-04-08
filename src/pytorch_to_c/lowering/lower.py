@@ -6,7 +6,6 @@ import torch
 import torch.fx as fx
 import numpy as np
 from typing import Dict, Any, Optional, Tuple
-import math
 
 from ..ir.node import IRNode
 from ..ir.graph import IRGraph

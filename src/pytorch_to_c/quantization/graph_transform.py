@@ -65,6 +65,9 @@ class QuantizationTransform:
         # Step 6: Validate dtype compatibility
         self._validate_graph(ir_graph)
         
+        # Rebuild lookup map after all mutations
+        ir_graph.rebuild_node_map()
+        
         return ir_graph
     
     def _find_nodes_to_quantize(self, ir_graph: IRGraph) -> Dict[IRNode, QuantRule]:
@@ -300,23 +303,6 @@ class QuantizationTransform:
                     f"but C API requires float32 output. "
                     f"Ensure your QuantIRNode.get_post_nodes() returns a DequantizeNode."
                 )
-    
-    def _get_expected_input_dtype(self, node: IRNode) -> str:
-        """
-        Get the expected input dtype for a node.
-        
-        Args:
-            node: The node to check
-            
-        Returns:
-            Expected input dtype ('float32', 'int8', or 'int16')
-        """
-        # Check if node has a dtype attribute indicating quantized
-        if hasattr(node, 'dtype') and node.dtype in ['int8', 'int16']:
-            return node.dtype
-        
-        # Default: float32
-        return 'float32'
     
     def _quantize_weights(self, ir_graph: IRGraph, nodes_to_quantize: Dict[IRNode, QuantRule]):
         """

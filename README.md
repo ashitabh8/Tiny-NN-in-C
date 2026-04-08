@@ -1,144 +1,159 @@
-# Tiny-NN-in-C, PyTorch to C Compiler
+# Tiny-NN-in-C
 
-A compiler that converts PyTorch models into standalone, dependency-free C code for microcontrollers.
+A source-to-source compiler that converts PyTorch `nn.Module` models into standalone, dependency-free C code targeting microcontrollers. Supports float32 and W8A8 (int8/int16) quantized inference. All generated C is header-only, portable, and uses zero dynamic allocation.
 
 ## Quick Start
 
-### 1. Setup
+### Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Run the TinyResNet Example
-
-```bash
-python examples/tiny_resnet.py
-```
-
-This generates C code in `tmp/tiny_resnet_for_embedded_device/`.
-
-### 3. Generated Files
-
-```
-tmp/tiny_resnet_for_embedded_device/
-├── model.h         # Function declarations
-├── model.c         # Model implementation
-├── weights.h       # Quantized weights (int8)
-└── nn_ops_*.h      # C operation kernels
-```
-
-### 4. Using the Generated C Code
-
-**Include in your project:**
-```c
-#include "model.h"
-```
-
-**Prepare input data and run inference:**
-```c
-float input_data[2000];   // 1 * 1 * 200 * 10 = 2000 floats
-float output[10];         // 10 classes
-
-// Fill input_data (see "Input Layout" section below)
-model_forward(input_data, output);
-
-// Find predicted class
-int predicted_class = 0;
-for (int i = 1; i < 10; i++) {
-    if (output[i] > output[predicted_class]) predicted_class = i;
-}
-```
-
-### 5. Compile for Your Target
-
-```bash
-# Host testing:
-gcc -O2 -o model_test main.c model.c -lm
-
-# ARM Cortex-M:
-arm-none-eabi-gcc -mcpu=cortex-m4 -O2 -c model.c -o model.o
-```
-
----
-
-## Input Layout (NHWC)
-
-The generated C code uses **NHWC layout** (channels-last), while PyTorch uses **NCHW** (channels-first).
-
-### TinyResNet Example
-
-| | PyTorch (NCHW) | C Code (NHWC) |
-|---|----------------|---------------|
-| **Shape** | `(1, 10, 1, 200)` | `(1, 1, 200, 10)` |
-| **Meaning** | batch, freq_bins, height, time_steps | batch, height, time_steps, freq_bins |
-| **Total floats** | 2000 | 2000 |
-
-### How to Fill the Input Array
-
-For the TinyResNet model with **10 frequency bins** and **200 time steps** (spectrogram input):
-
-```
-NHWC layout: input[time_step * num_freq_bins + freq_bin]
-
-  input[0]   = freq bin 0 at time 0
-  input[1]   = freq bin 1 at time 0
-  ...
-  input[9]   = freq bin 9 at time 0
-  input[10]  = freq bin 0 at time 1
-  input[11]  = freq bin 1 at time 1
-  ...
-  input[1999] = freq bin 9 at time 199
-```
-
-**C code example:**
-```c
-#define NUM_FREQ_BINS 10
-#define NUM_TIMESTEPS 200
-
-float input_data[NUM_TIMESTEPS * NUM_FREQ_BINS];
-
-// Fill from spectrogram (magnitude values)
-for (int t = 0; t < NUM_TIMESTEPS; t++) {
-    for (int f = 0; f < NUM_FREQ_BINS; f++) {
-        input_data[t * NUM_FREQ_BINS + f] = spectrogram[f][t];
-    }
-}
-```
-
-### Converting from PyTorch
-
-If you have a PyTorch tensor in NCHW format, convert it to NHWC:
+### Compile a model
 
 ```python
-# PyTorch tensor: shape (1, 10, 1, 200) in NCHW
-pytorch_input = torch.randn(1, 10, 1, 200)
+import torch
+from src.pytorch_to_c.compiler import compile_model
+from models import TinyMLP
 
-# Convert to NHWC: shape (1, 1, 200, 10)
-nhwc_input = pytorch_input.permute(0, 2, 3, 1)
-
-# Flatten to 1D array for C
-c_input = nhwc_input.numpy().flatten()  # shape: (2000,)
+model = TinyMLP()
+model.eval()
+example_input = torch.randn(1, 784)
+compile_model(model, example_input, output_dir="output/")
 ```
 
----
+The generated `output/` directory is self-contained:
 
-## Model Details
+```
+output/
+  model.h         # void model_forward(const float* input, float* output);
+  model.c         # implementation (slot-based buffer reuse)
+  weights.h       # static const arrays
+  nn_ops_float.h  # header-only C runtime kernels
+```
 
-- **Input:** Spectrogram with 10 frequency bins × 200 time steps
-- **Input shape:** `(1, 10, 1, 200)` NCHW → `(1, 1, 200, 10)` NHWC in C
-- **Output shape:** `(10,)` - 10-class scores
-- **Model size:** ~100KB (int8 quantized)
-- **Architecture:** ResNet-style with skip connections
+### Use the generated C code
+
+```c
+#include "model.h"
+
+float input[784];
+float output[10];
+
+// fill input ...
+model_forward(input, output);
+```
+
+Compile for your target:
+
+```bash
+gcc -O2 -o model_test main.c model.c -lm              # host testing
+arm-none-eabi-gcc -mcpu=cortex-m4 -O2 -c model.c -o model.o  # ARM Cortex-M
+```
+
+## Supported PyTorch Operations
+
+| PyTorch module / function | Status |
+|---------------------------|--------|
+| `nn.Conv2d`               | float, int8, int16 |
+| `nn.Linear`               | float, int8, int16 |
+| `nn.ReLU`                 | float, int8, int16 |
+| `nn.BatchNorm2d`          | float |
+| `nn.Softmax`              | float |
+| `nn.AdaptiveAvgPool2d`    | float |
+| `torch.add` / `+`         | float |
+| `torch.mul` / `*`         | float |
+| `tensor.view` / `flatten` | float |
+| `tensor.mean(dim=...)`    | float (spatial dims) |
+
+## Quantization
+
+Apply int8 or int16 quantization using the rule + transform pattern:
+
+```python
+from src.pytorch_to_c.quantization import StaticQuantRule, QuantizationTransform
+from src.pytorch_to_c.codegen.c_printer import CPrinter
+
+ir_graph = compile_model(model, example_input, return_ir=True)
+
+rules = [
+    StaticQuantRule(pattern=r'.*conv.*', dtype='int8',
+                    input_scale=0.05, input_offset=0,
+                    weight_scale=0.02, weight_offset=0,
+                    output_scale=0.05, output_offset=0),
+]
+ir_graph = QuantizationTransform(rules).apply(ir_graph)
+CPrinter(ir_graph).generate_all("output_quant/")
+```
+
+See [docs/quantization.md](docs/quantization.md) for the full guide including dynamic quantization, mixed precision, and how to add custom rules.
+
+## Arduino Support
+
+Pass `arduino_mode=True` to `CPrinter` to generate an `.ino` sketch:
+
+```python
+CPrinter(ir_graph, arduino_mode=True).generate_all("my_sketch/")
+```
+
+The generated sketch includes `setup()`/`loop()`, profiling via `micros()`, and `Serial` output.
+
+## Verify Your Model
+
+Use the built-in verification tool to confirm the C output matches PyTorch:
+
+```bash
+python -m tools.verify_model \
+  --model models/tiny_mlp.py:TinyMLP \
+  --input-shape 1,784 \
+  --num-samples 50
+```
+
+Or from Python:
+
+```python
+from tools.verify_model import verify_model
+
+results = verify_model(model, example_input, num_samples=50)
+print(results.summary())
+```
+
+## Examples
+
+| Example | Description |
+|---------|-------------|
+| `examples/tiny_mlp.py` | Simplest: MLP to float C |
+| `examples/tiny_resnet.py` | ResNet1D with static int8 quantization |
+| `examples/tiny_mixed_net.py` | Conv + Linear + Softmax |
+| `examples/quantized_mlp.py` | Fine-grained per-layer quantization |
+| `examples/dynamic_quantization.py` | Dynamic min-max per-tensor |
+| `examples/example_op_no_op.py` | FuseDequantQuantPass optimization demo |
+| `examples/profiling_example.py` | Profiling transform demo |
+| `examples/mnist_cnn.py` | MNIST training + compilation |
+
+## How to Extend
+
+- **New float op**: add lowering in `lower.py`, codegen in `c_printer.py`, C kernel in `nn_ops_float.h`
+- **New quantized op**: subclass `QuantIRNode`, implement `generate_c_code()`, add C kernel to `nn_ops_int8.h`
+- **New IR pass**: subclass `IRPass`, implement `apply(ir_graph)`
+- **New transform**: follow the `profiling/` module pattern (rule + matcher + transform + ops)
+
+See [docs/quantization.md](docs/quantization.md) for details.
+
+## Input Layout
+
+The generated C code uses **NHWC** (channels-last). PyTorch uses **NCHW** (channels-first). Convert before calling `model_forward()`:
+
+```python
+nhwc_input = pytorch_input.permute(0, 2, 3, 1).numpy().flatten()
+```
 
 ## Testing
 
 ```bash
-# Run all tests
-pytest test/
-
-# Run quantization tests
-pytest test/test_quantization_e2e.py -v
+pytest test/ -v                        # all tests
+pytest test/test_verify_harness.py -v  # verification harness (requires gcc)
 ```
 
 ## License

@@ -9,9 +9,6 @@
 #include <math.h>
 #include <stddef.h>
 
-// Clamp helper
-static inline int clamp_int(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
 // Conv2D (NHWC input, HWIO filters) — matches PyTorch Conv2d padding
 // in:  [H, W, C_in]
 // filt:[K_h, K_w, C_in, C_out]
@@ -158,7 +155,6 @@ static inline void batchnorm2d_nhwc(
     float eps,
     float* out)
 {
-    const int n = h * w;
     for (int ih = 0; ih < h; ++ih) {
         for (int iw = 0; iw < w; ++iw) {
             const float* in_px = in + ((ih * w + iw) * c);

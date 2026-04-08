@@ -424,7 +424,7 @@ static void test_conv2d_int8_output_scale(void) {
 
 static void test_relu_int8(void) {
     int8_t x[] = {-5, 0, 3, -128};
-    relu_int8(x, 4);
+    relu_int8(x, 4, 0);
     assert(x[0] == 0 && x[1] == 0 && x[2] == 3 && x[3] == 0);
     printf("  test_relu_int8 PASS\n");
 }

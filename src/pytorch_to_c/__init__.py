@@ -7,3 +7,7 @@ dependency-free C code suitable for microcontrollers.
 
 __version__ = "0.1.0"
 
+from .compiler import compile_model, PyTorchToCCompiler
+from .codegen.c_printer import CPrinter
+from .ir.graph import IRGraph
+from .ir.node import IRNode

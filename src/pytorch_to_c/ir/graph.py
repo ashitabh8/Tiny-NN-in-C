@@ -119,6 +119,14 @@ class IRGraph:
         
         return sorted_nodes
     
+    def rebuild_node_map(self) -> None:
+        """Rebuild the internal name-to-node lookup from the current nodes list.
+
+        Call this after any transform that mutates ``self.nodes`` directly
+        (replace, insert, or remove) without going through ``add_node``.
+        """
+        self._node_map = {node.name: node for node in self.nodes}
+
     def validate(self) -> bool:
         """
         Validate the graph structure.

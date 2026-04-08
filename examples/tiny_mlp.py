@@ -14,22 +14,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from src.pytorch_to_c.compiler import compile_model
-
-
-class SimpleMLP(nn.Module):
-    """A simple 2-layer MLP for demonstration."""
-    
-    def __init__(self, input_size=784, hidden_size=128, output_size=10):
-        super().__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, output_size)
-    
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return x
+from models import TinyMLP
 
 
 def main():
@@ -41,7 +26,7 @@ def main():
     
     # Create a simple model
     print("Creating model...")
-    model = SimpleMLP(input_size=784, hidden_size=128, output_size=10)
+    model = TinyMLP(input_size=784, hidden_size=128, output_size=10)
     model.eval()
     
     # Create example input
@@ -60,7 +45,7 @@ def main():
     print("Compiling to C...")
     print("=" * 60)
     
-    output_dir = "generated"
+    output_dir = "tmp/generated_mlp"
     ir_graph = compile_model(
         model=model,
         example_input=example_input,
