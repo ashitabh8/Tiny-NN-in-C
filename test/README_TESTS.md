@@ -16,6 +16,7 @@
 | `test_verify_harness.py` | Verification tool on float and quantized models |
 | `test_c_ops.c` | Standalone C unit tests for `nn_ops_float.h` |
 | `test_c_ops_int8.c` | Standalone C unit tests for `nn_ops_int8.h` |
+| `test_c_ops_int16.c` | Standalone C unit tests for `nn_ops_int16.h` |
 
 ## Running Tests
 
@@ -38,6 +39,7 @@ pytest test/ -v -k "not TestPyTorchCComparison and not TestVerify"
 ```bash
 gcc -o test_c_ops test/test_c_ops.c -Isrc/c_ops -lm && ./test_c_ops
 gcc -o test_c_ops_int8 test/test_c_ops_int8.c -Isrc/c_ops -lm && ./test_c_ops_int8
+gcc -o test_c_ops_int16 test/test_c_ops_int16.c -Isrc/c_ops -lm && ./test_c_ops_int16
 ```
 
 ## Requirements

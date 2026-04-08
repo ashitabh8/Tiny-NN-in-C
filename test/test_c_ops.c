@@ -76,6 +76,90 @@ static void test_dense(void) {
     printf("  test_dense PASS\n");
 }
 
+static void test_conv2d_nhwc_1x1(void) {
+    /* in_h=2, in_w=2, in_c=2, out_c=1, kernel=1x1 */
+    float in[] = {
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f
+    };
+    float filt[] = {1.0f, -1.0f}; /* output = c0 - c1 */
+    float bias[] = {0.5f};
+    float out[4];
+    conv2d_nhwc(in, 2, 2, 2, filt, 1, 1, 1, bias, 1, 1, 0, 0, out);
+    assert(fabsf(out[0] - (-0.5f)) < TOL); /* 1-2+0.5 */
+    assert(fabsf(out[1] - (-0.5f)) < TOL); /* 3-4+0.5 */
+    assert(fabsf(out[2] - (-0.5f)) < TOL); /* 5-6+0.5 */
+    assert(fabsf(out[3] - (-0.5f)) < TOL); /* 7-8+0.5 */
+    printf("  test_conv2d_nhwc_1x1 PASS\n");
+}
+
+static void test_depthwise_conv2d_nhwc_identity(void) {
+    /* 1x1 depthwise with filt=[1,1] should copy input (+bias) per channel */
+    float in[] = {
+        1.0f, 2.0f,
+        3.0f, 4.0f
+    }; /* h=1,w=2,c=2 */
+    float filt[] = {1.0f, 1.0f}; /* k_h=1,k_w=1,c=2 */
+    float bias[] = {0.0f, 0.5f};
+    float out[4];
+    depthwise_conv2d_nhwc(in, 1, 2, 2, filt, 1, 1, bias, 1, 1, 0, 0, out);
+    assert(fabsf(out[0] - 1.0f) < TOL);
+    assert(fabsf(out[1] - 2.5f) < TOL);
+    assert(fabsf(out[2] - 3.0f) < TOL);
+    assert(fabsf(out[3] - 4.5f) < TOL);
+    printf("  test_depthwise_conv2d_nhwc_identity PASS\n");
+}
+
+static void test_permute_4d_nchw_to_nhwc(void) {
+    /* NCHW [1,2,2,2] -> NHWC [1,2,2,2] with perm [0,2,3,1] */
+    float in[8] = {
+        /* c0 */
+        1.0f, 2.0f, 3.0f, 4.0f,
+        /* c1 */
+        10.0f, 20.0f, 30.0f, 40.0f
+    };
+    float out[8];
+    permute_4d(in, 1, 2, 2, 2, 0, 2, 3, 1, out);
+    /* Expected NHWC: (h,w,c): [1,10], [2,20], [3,30], [4,40] */
+    float exp[8] = {1.0f, 10.0f, 2.0f, 20.0f, 3.0f, 30.0f, 4.0f, 40.0f};
+    for (int i = 0; i < 8; ++i) {
+        assert(fabsf(out[i] - exp[i]) < TOL);
+    }
+    printf("  test_permute_4d_nchw_to_nhwc PASS\n");
+}
+
+static void test_softmax(void) {
+    float x[] = {1.0f, 2.0f, 3.0f};
+    softmax(x, 3);
+    float sum = x[0] + x[1] + x[2];
+    assert(fabsf(sum - 1.0f) < 1e-6f);
+    assert(x[2] > x[1] && x[1] > x[0]); /* monotonic with logits */
+    printf("  test_softmax PASS\n");
+}
+
+static void test_mean_helpers(void) {
+    float in_hwc[] = {
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f
+    }; /* h=2,w=2,c=2 */
+    float out_a[2], out_b[2];
+    global_average_pool_2d(in_hwc, 2, 2, 2, out_a);
+    mean_hwc(in_hwc, 2, 2, 2, out_b);
+    assert(fabsf(out_a[0] - out_b[0]) < TOL);
+    assert(fabsf(out_a[1] - out_b[1]) < TOL);
+
+    float mat[] = {2.0f, 4.0f, 6.0f, -3.0f, 0.0f, 3.0f}; /* rows=2, cols=3 */
+    float row_mean[2];
+    mean_last_dim(mat, 2, 3, row_mean);
+    assert(fabsf(row_mean[0] - 4.0f) < TOL);
+    assert(fabsf(row_mean[1] - 0.0f) < TOL);
+    printf("  test_mean_helpers PASS\n");
+}
+
 static void test_batchnorm2d_nhwc(void) {
     /* 1x1 spatial, 2 channels. in=[10, 20], mean=0, var=1, gamma=1, beta=0 */
     float in[] = {10.0f, 20.0f};
@@ -93,6 +177,11 @@ static void test_batchnorm2d_nhwc(void) {
 int main(void) {
     printf("Running C ops tests...\n");
     test_relu();
+    test_conv2d_nhwc_1x1();
+    test_depthwise_conv2d_nhwc_identity();
+    test_permute_4d_nchw_to_nhwc();
+    test_softmax();
+    test_mean_helpers();
     test_global_average_pool_2d();
     test_adaptive_avg_pool_1x1();
     test_flatten();

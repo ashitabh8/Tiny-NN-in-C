@@ -54,39 +54,6 @@ class TestIntegration:
                 except Exception as e:
                     pytest.fail(f"Failed to compile {model_name}: {e}")
     
-    def test_generated_c_compiles(self):
-        """Test that generated C code compiles with gcc (if available)."""
-        model = TinyMLP(input_size=10, hidden_size=5, output_size=2)
-        example_input = torch.randn(1, 10)
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            compiler = PyTorchToCCompiler(verbose=False)
-            compiler.compile(model, example_input, tmpdir)
-            
-            # Try to compile with gcc (skip if not available)
-            try:
-                # Check if gcc is available
-                subprocess.run(
-                    ["gcc", "--version"],
-                    check=True,
-                    capture_output=True
-                )
-                
-                # Note: This is a basic syntax check, not a full compilation
-                # Full compilation would require all headers and proper includes
-                result = subprocess.run(
-                    ["gcc", "-fsyntax-only", "-c", 
-                     os.path.join(tmpdir, "model.c"),
-                     "-I", tmpdir],
-                    capture_output=True
-                )
-                
-                # For now, we just verify the files exist and have content
-                # Full gcc compilation testing can be added later
-                
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                pytest.skip("gcc not available for compilation test")
-    
     def test_pipeline_preserves_model_info(self):
         """Test that the compilation pipeline preserves important model information."""
         model = TinyMLP()

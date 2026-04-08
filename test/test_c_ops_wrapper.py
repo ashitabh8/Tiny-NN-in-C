@@ -1,7 +1,7 @@
 """
 Pytest wrapper for standalone C unit tests.
 
-Compiles and runs test_c_ops.c and test_c_ops_int8.c.
+Compiles and runs test_c_ops.c, test_c_ops_int8.c, and test_c_ops_int16.c.
 Auto-skips if gcc is not available.
 """
 
@@ -35,7 +35,7 @@ def _compile_and_run(c_file):
     with tempfile.TemporaryDirectory() as tmpdir:
         exe = os.path.join(tmpdir, basename)
         result = subprocess.run(
-            ["gcc", "-o", exe, c_file, f"-I{C_OPS_DIR}", "-lm", "-std=c99", "-O2"],
+            ["gcc", "-o", exe, c_file, f"-I{C_OPS_DIR}", "-lm", "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror"],
             capture_output=True, text=True, timeout=30,
         )
         assert result.returncode == 0, f"Compile failed:\n{result.stderr}"
@@ -57,4 +57,12 @@ class TestCOpsInt8:
         c_file = os.path.join(TEST_DIR, "test_c_ops_int8.c")
         if not os.path.exists(c_file):
             pytest.skip("test_c_ops_int8.c not found")
+        _compile_and_run(c_file)
+
+
+class TestCOpsInt16:
+    def test_run(self):
+        c_file = os.path.join(TEST_DIR, "test_c_ops_int16.c")
+        if not os.path.exists(c_file):
+            pytest.skip("test_c_ops_int16.c not found")
         _compile_and_run(c_file)

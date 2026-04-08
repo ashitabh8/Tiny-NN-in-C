@@ -315,319 +315,88 @@ int main(int argc, char* argv[]) {{
         print(f"  Max relative error:  {results['max_rel_error']:.4e} ({results['max_rel_error']*100:.2f}%)")
         print(f"  Mean relative error: {results['mean_rel_error']:.4e} ({results['mean_rel_error']*100:.2f}%)")
     
-    # =========================================================================
-    # Static Quantization Tests
-    # =========================================================================
-    
-    def test_static_quant_int8(self):
-        """Test static int8 quantization end-to-end."""
-        if not self._check_gcc_available():
-            pytest.skip("gcc not available")
-        
-        torch.manual_seed(42)
-        model = SimpleMLP(input_size=16, hidden_size=8, output_size=4)
-        example_input = torch.randn(1, 16) * 0.5  # Keep inputs small
-        
-        rules = [
-            StaticQuantRule(
-                pattern=r'fc.*',
-                dtype='int8',
+    @staticmethod
+    def _simple_mlp_rules(config):
+        if config == "static_int8":
+            return [StaticQuantRule(
+                pattern=r'fc.*', dtype='int8',
                 input_scale=0.01, input_offset=0,
                 weight_scale=0.01, weight_offset=0,
                 output_scale=0.01, output_offset=0
-            )
-        ]
-        
-        results = self._run_quantized_test(
-            model=model,
-            example_input=example_input,
-            rules=rules,
-            input_size=16,
-            output_size=4,
-            test_name="Static Quantization - int8"
-        )
-        
-        self._print_results(results)
-        
-        # Verify model runs (main goal)
-        assert results['c_output'] is not None
-        assert len(results['c_output']) == 4
-        
-        # Relaxed tolerance for quantized models
-        # Note: May fail due to quantization error - that's expected
-        tolerance = 1e-1
-        if results['max_abs_error'] < tolerance:
-            print(f"  ✓ PASSED (max_abs_error < {tolerance})")
-        else:
-            print(f"  ⚠ High error (max_abs_error >= {tolerance}) - expected for quantization")
-        
-        # Just verify it's not completely wrong (sanity check)
-        assert results['max_abs_error'] < 10.0, "Output seems completely wrong"
-    
-    def test_static_quant_int16(self):
-        """Test static int16 quantization end-to-end."""
-        if not self._check_gcc_available():
-            pytest.skip("gcc not available")
-        
-        torch.manual_seed(42)
-        model = SimpleMLP(input_size=16, hidden_size=8, output_size=4)
-        example_input = torch.randn(1, 16) * 0.5
-        
-        rules = [
-            StaticQuantRule(
-                pattern=r'fc.*',
-                dtype='int16',
+            )]
+        if config == "static_int16":
+            return [StaticQuantRule(
+                pattern=r'fc.*', dtype='int16',
                 input_scale=0.001, input_offset=0,
                 weight_scale=0.001, weight_offset=0,
                 output_scale=0.001, output_offset=0
-            )
-        ]
-        
-        results = self._run_quantized_test(
-            model=model,
-            example_input=example_input,
-            rules=rules,
-            input_size=16,
-            output_size=4,
-            test_name="Static Quantization - int16"
-        )
-        
-        self._print_results(results)
-        
-        # Verify model runs
-        assert results['c_output'] is not None
-        assert len(results['c_output']) == 4
-        
-        # int16 should have better accuracy than int8
-        tolerance = 1e-1
-        if results['max_abs_error'] < tolerance:
-            print(f"  ✓ PASSED (max_abs_error < {tolerance})")
-        else:
-            print(f"  ⚠ High error (max_abs_error >= {tolerance}) - expected for quantization")
-        
-        assert results['max_abs_error'] < 10.0, "Output seems completely wrong"
-    
-    # =========================================================================
-    # Dynamic Quantization Tests
-    # =========================================================================
-    
-    def test_dynamic_quant_int8(self):
-        """Test dynamic int8 quantization end-to-end."""
-        if not self._check_gcc_available():
-            pytest.skip("gcc not available")
-        
-        torch.manual_seed(42)
-        model = SimpleMLP(input_size=16, hidden_size=8, output_size=4)
-        example_input = torch.randn(1, 16) * 0.5
-        
-        rules = [
-            DynamicQuantRuleMinMaxPerTensor(
-                pattern=r'fc.*',
-                dtype='int8'
-            )
-        ]
-        
-        results = self._run_quantized_test(
-            model=model,
-            example_input=example_input,
-            rules=rules,
-            input_size=16,
-            output_size=4,
-            test_name="Dynamic Quantization - int8"
-        )
-        
-        self._print_results(results)
-        
-        # Verify model runs
-        assert results['c_output'] is not None
-        assert len(results['c_output']) == 4
-        
-        tolerance = 1e-1
-        if results['max_abs_error'] < tolerance:
-            print(f"  ✓ PASSED (max_abs_error < {tolerance})")
-        else:
-            print(f"  ⚠ High error (max_abs_error >= {tolerance}) - expected for quantization")
-        
-        assert results['max_abs_error'] < 10.0, "Output seems completely wrong"
-    
-    def test_dynamic_quant_int16(self):
-        """Test dynamic int16 quantization end-to-end."""
-        if not self._check_gcc_available():
-            pytest.skip("gcc not available")
-        
-        torch.manual_seed(42)
-        model = SimpleMLP(input_size=16, hidden_size=8, output_size=4)
-        example_input = torch.randn(1, 16) * 0.5
-        
-        rules = [
-            DynamicQuantRuleMinMaxPerTensor(
-                pattern=r'fc.*',
-                dtype='int16'
-            )
-        ]
-        
-        results = self._run_quantized_test(
-            model=model,
-            example_input=example_input,
-            rules=rules,
-            input_size=16,
-            output_size=4,
-            test_name="Dynamic Quantization - int16"
-        )
-        
-        self._print_results(results)
-        
-        # Verify model runs
-        assert results['c_output'] is not None
-        assert len(results['c_output']) == 4
-        
-        tolerance = 1e-1
-        if results['max_abs_error'] < tolerance:
-            print(f"  ✓ PASSED (max_abs_error < {tolerance})")
-        else:
-            print(f"  ⚠ High error (max_abs_error >= {tolerance}) - expected for quantization")
-        
-        assert results['max_abs_error'] < 10.0, "Output seems completely wrong"
-    
-    # =========================================================================
-    # Mixed Precision Test
-    # =========================================================================
-    
-    def test_mixed_precision(self):
-        """Test mixed int8/int16 quantization end-to-end."""
-        if not self._check_gcc_available():
-            pytest.skip("gcc not available")
-        
-        torch.manual_seed(42)
-        model = SimpleMLP(input_size=16, hidden_size=8, output_size=4)
-        example_input = torch.randn(1, 16) * 0.5
-        
-        rules = [
-            # First layer: int8 (aggressive)
-            StaticQuantRule(
-                pattern=r'fc1',
-                dtype='int8',
-                input_scale=0.01, input_offset=0,
-                weight_scale=0.01, weight_offset=0,
-                output_scale=0.01, output_offset=0
-            ),
-            # Second layer: int16 (higher precision)
-            StaticQuantRule(
-                pattern=r'fc2',
-                dtype='int16',
-                input_scale=0.001, input_offset=0,
-                weight_scale=0.001, weight_offset=0,
-                output_scale=0.001, output_offset=0
-            ),
-        ]
-        
-        results = self._run_quantized_test(
-            model=model,
-            example_input=example_input,
-            rules=rules,
-            input_size=16,
-            output_size=4,
-            test_name="Mixed Precision - int8/int16"
-        )
-        
-        self._print_results(results)
-        
-        # Verify model runs
-        assert results['c_output'] is not None
-        assert len(results['c_output']) == 4
-        
-        tolerance = 1e-1
-        if results['max_abs_error'] < tolerance:
-            print(f"  ✓ PASSED (max_abs_error < {tolerance})")
-        else:
-            print(f"  ⚠ High error (max_abs_error >= {tolerance}) - expected for quantization")
-        
-        assert results['max_abs_error'] < 10.0, "Output seems completely wrong"
-
-
-class TestQuantizedCompilationOnly:
-    """Tests that just verify C code compiles (no execution comparison)."""
-    
-    def _check_gcc_available(self):
-        try:
-            subprocess.run(["gcc", "--version"], check=True, capture_output=True, timeout=5)
-            return True
-        except:
-            return False
-    
-    def test_all_quant_configs_compile(self):
-        """Verify all quantization configurations produce compilable C code."""
-        if not self._check_gcc_available():
-            pytest.skip("gcc not available")
-        
-        torch.manual_seed(42)
-        model = SimpleMLP(input_size=16, hidden_size=8, output_size=4)
-        example_input = torch.randn(1, 16)
-        
-        configs = [
-            ("static_int8", [StaticQuantRule(
-                r'fc.*', 'int8',
-                input_scale=0.01, input_offset=0,
-                weight_scale=0.01, weight_offset=0,
-                output_scale=0.01, output_offset=0
-            )]),
-            ("static_int16", [StaticQuantRule(
-                r'fc.*', 'int16',
-                input_scale=0.001, input_offset=0,
-                weight_scale=0.001, weight_offset=0,
-                output_scale=0.001, output_offset=0
-            )]),
-            ("dynamic_int8", [DynamicQuantRuleMinMaxPerTensor(r'fc.*', 'int8')]),
-            ("dynamic_int16", [DynamicQuantRuleMinMaxPerTensor(r'fc.*', 'int16')]),
-            ("mixed", [
+            )]
+        if config == "dynamic_int8":
+            return [DynamicQuantRuleMinMaxPerTensor(pattern=r'fc.*', dtype='int8')]
+        if config == "dynamic_int16":
+            return [DynamicQuantRuleMinMaxPerTensor(pattern=r'fc.*', dtype='int16')]
+        if config == "mixed":
+            return [
                 StaticQuantRule(
-                    r'fc1', 'int8',
+                    pattern=r'fc1', dtype='int8',
                     input_scale=0.01, input_offset=0,
                     weight_scale=0.01, weight_offset=0,
                     output_scale=0.01, output_offset=0
                 ),
                 StaticQuantRule(
-                    r'fc2', 'int16',
+                    pattern=r'fc2', dtype='int16',
                     input_scale=0.001, input_offset=0,
                     weight_scale=0.001, weight_offset=0,
                     output_scale=0.001, output_offset=0
                 ),
-            ]),
-        ]
+            ]
+        raise ValueError(f"Unknown config: {config}")
+
+    @pytest.mark.parametrize(
+        "config,test_name",
+        [
+            ("static_int8", "Static Quantization - int8"),
+            ("static_int16", "Static Quantization - int16"),
+            ("dynamic_int8", "Dynamic Quantization - int8"),
+            ("dynamic_int16", "Dynamic Quantization - int16"),
+            ("mixed", "Mixed Precision - int8/int16"),
+        ],
+    )
+    def test_quantized_configs(self, config, test_name):
+        """Parameterized quantized SimpleMLP E2E checks."""
+        if not self._check_gcc_available():
+            pytest.skip("gcc not available")
         
-        for config_name, rules in configs:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                try:
-                    # Compile to IR
-                    ir_graph = compile_model(
-                        model, example_input, 
-                        output_dir=None, verbose=False, return_ir=True
-                    )
-                    
-                    # Apply quantization
-                    transform = QuantizationTransform(rules)
-                    quant_ir = transform.apply(ir_graph)
-                    
-                    # Generate C code
-                    printer = CPrinter(quant_ir)
-                    printer.generate_all(tmpdir)
-                    
-                    # Compile with gcc
-                    result = subprocess.run(
-                        ["gcc", "-c", os.path.join(tmpdir, "model.c"),
-                         "-I", tmpdir, "-o", os.path.join(tmpdir, "model.o")],
-                        capture_output=True, timeout=30, text=True
-                    )
-                    
-                    if result.returncode != 0:
-                        print(f"\n{config_name} compilation failed:")
-                        print(result.stderr)
-                        pytest.fail(f"{config_name} failed to compile")
-                    
-                    print(f"  ✓ {config_name} compiles successfully")
-                    
-                except Exception as e:
-                    pytest.fail(f"{config_name} failed: {e}")
+        torch.manual_seed(42)
+        model = SimpleMLP(input_size=16, hidden_size=8, output_size=4)
+        example_input = torch.randn(1, 16) * 0.5
+        rules = self._simple_mlp_rules(config)
+        
+        results = self._run_quantized_test(
+            model=model,
+            example_input=example_input,
+            rules=rules,
+            input_size=16,
+            output_size=4,
+            test_name=test_name
+        )
+        
+        self._print_results(results)
+        
+        # Verify model runs
+        assert results['c_output'] is not None
+        assert len(results['c_output']) == 4
+        
+        tolerance = 1e-1
+        if results['max_abs_error'] < tolerance:
+            print(f"  ✓ PASSED (max_abs_error < {tolerance})")
+        else:
+            print(f"  ⚠ High error (max_abs_error >= {tolerance}) - expected for quantization")
+        
+        assert results['max_abs_error'] < tolerance, (
+            f"{results['test_name']} exceeded tolerance: "
+            f"max_abs_error={results['max_abs_error']:.4e}, tolerance={tolerance:.4e}"
+        )
 
 
 class TestResNetE2E:
@@ -846,12 +615,61 @@ int main(int argc, char* argv[]) {{
             assert max_abs_error < tolerance, \
                 f"Float ResNet error too high: {max_abs_error:.4e} >= {tolerance}"
     
-    # =========================================================================
-    # Static Quantization ResNet Tests
-    # =========================================================================
-    
-    def test_resnet_static_quant_int8(self):
-        """Test ResNet with static int8 quantization on conv and linear layers."""
+    @staticmethod
+    def _resnet_rules(config):
+        if config == "static_int8":
+            return [
+                StaticQuantRule(
+                    pattern=r'.*conv.*', dtype='int8',
+                    input_scale=0.02, input_offset=0,
+                    weight_scale=0.02, weight_offset=0,
+                    output_scale=0.02, output_offset=0
+                ),
+                StaticQuantRule(
+                    pattern=r'.*fc.*', dtype='int8',
+                    input_scale=0.02, input_offset=0,
+                    weight_scale=0.02, weight_offset=0,
+                    output_scale=0.02, output_offset=0
+                ),
+            ]
+        if config == "static_int16":
+            return [
+                StaticQuantRule(
+                    pattern=r'.*conv.*', dtype='int16',
+                    input_scale=0.001, input_offset=0,
+                    weight_scale=0.001, weight_offset=0,
+                    output_scale=0.001, output_offset=0
+                ),
+                StaticQuantRule(
+                    pattern=r'.*fc.*', dtype='int16',
+                    input_scale=0.001, input_offset=0,
+                    weight_scale=0.001, weight_offset=0,
+                    output_scale=0.001, output_offset=0
+                ),
+            ]
+        if config == "dynamic_int8":
+            return [
+                DynamicQuantRuleMinMaxPerTensor(pattern=r'.*conv.*', dtype='int8'),
+                DynamicQuantRuleMinMaxPerTensor(pattern=r'.*fc.*', dtype='int8'),
+            ]
+        if config == "dynamic_int16":
+            return [
+                DynamicQuantRuleMinMaxPerTensor(pattern=r'.*conv.*', dtype='int16'),
+                DynamicQuantRuleMinMaxPerTensor(pattern=r'.*fc.*', dtype='int16'),
+            ]
+        raise ValueError(f"Unknown config: {config}")
+
+    @pytest.mark.parametrize(
+        "config,test_name",
+        [
+            ("static_int8", "ResNet Static Quantization - int8 (conv + linear)"),
+            ("static_int16", "ResNet Static Quantization - int16 (conv + linear)"),
+            ("dynamic_int8", "ResNet Dynamic Quantization - int8 (conv + linear)"),
+            ("dynamic_int16", "ResNet Dynamic Quantization - int16 (conv + linear)"),
+        ],
+    )
+    def test_resnet_quantized_configs(self, config, test_name):
+        """Parameterized ResNet quantized E2E checks."""
         if not self._check_gcc_available():
             pytest.skip("gcc not available")
         
@@ -863,108 +681,7 @@ int main(int argc, char* argv[]) {{
         input_size = 3 * 8 * 8
         output_size = 4
         
-        # Quantize both conv and linear layers
-        rules = [
-            StaticQuantRule(
-                pattern=r'.*conv.*',
-                dtype='int8',
-                input_scale=0.02, input_offset=0,
-                weight_scale=0.02, weight_offset=0,
-                output_scale=0.02, output_offset=0
-            ),
-            StaticQuantRule(
-                pattern=r'.*fc.*',
-                dtype='int8',
-                input_scale=0.02, input_offset=0,
-                weight_scale=0.02, weight_offset=0,
-                output_scale=0.02, output_offset=0
-            ),
-        ]
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Compile to IR
-            ir_graph = compile_model(
-                model, example_input,
-                output_dir=None, verbose=False, return_ir=True
-            )
-            
-            # Apply quantization
-            transform = QuantizationTransform(rules)
-            quant_ir = transform.apply(ir_graph)
-            
-            # Generate C code
-            printer = CPrinter(quant_ir)
-            printer.generate_all(tmpdir)
-            
-            # Get PyTorch output
-            with torch.no_grad():
-                pytorch_output = model(example_input)
-            pytorch_output_np = pytorch_output.numpy().flatten()
-            
-            # Get C output - convert NCHW to NHWC for C code
-            input_nhwc = example_input.permute(0, 2, 3, 1).numpy().flatten()
-            c_output_np = self._compile_and_run_c_model(
-                tmpdir, input_nhwc, input_size, output_size
-            )
-            
-            abs_error = np.abs(pytorch_output_np - c_output_np)
-            max_abs_error = np.max(abs_error)
-            mean_abs_error = np.mean(abs_error)
-            
-            eps = 1e-7
-            rel_error = abs_error / (np.abs(pytorch_output_np) + eps)
-            
-            results = {
-                'test_name': 'ResNet Static Quantization - int8 (conv + linear)',
-                'pytorch_output': pytorch_output_np,
-                'c_output': c_output_np,
-                'max_abs_error': max_abs_error,
-                'mean_abs_error': mean_abs_error,
-                'max_rel_error': np.max(rel_error),
-                'mean_rel_error': np.mean(rel_error),
-            }
-            
-            self._print_results(results)
-            
-            # Quantized can have higher error
-            tolerance = 1e-1
-            if max_abs_error < tolerance:
-                print(f"  ✓ PASSED (max_abs_error < {tolerance})")
-            else:
-                print(f"  ⚠ High error (expected for quantization): {max_abs_error:.4e}")
-            
-            # Sanity check
-            assert max_abs_error < 10.0, "Output seems completely wrong"
-    
-    def test_resnet_static_quant_int16(self):
-        """Test ResNet with static int16 quantization on conv and linear layers."""
-        if not self._check_gcc_available():
-            pytest.skip("gcc not available")
-        
-        torch.manual_seed(42)
-        model = TinyResNet(in_channels=3, num_classes=4, channels=16)
-        model.eval()
-        
-        example_input = torch.randn(1, 3, 8, 8) * 0.5
-        input_size = 3 * 8 * 8
-        output_size = 4
-        
-        rules = [
-            StaticQuantRule(
-                pattern=r'.*conv.*',
-                dtype='int16',
-                input_scale=0.001, input_offset=0,
-                weight_scale=0.001, weight_offset=0,
-                output_scale=0.001, output_offset=0
-            ),
-            StaticQuantRule(
-                pattern=r'.*fc.*',
-                dtype='int16',
-                input_scale=0.001, input_offset=0,
-                weight_scale=0.001, weight_offset=0,
-                output_scale=0.001, output_offset=0
-            ),
-        ]
+        rules = self._resnet_rules(config)
         
         with tempfile.TemporaryDirectory() as tmpdir:
             ir_graph = compile_model(
@@ -992,7 +709,7 @@ int main(int argc, char* argv[]) {{
             max_abs_error = np.max(abs_error)
             
             results = {
-                'test_name': 'ResNet Static Quantization - int16 (conv + linear)',
+                'test_name': test_name,
                 'pytorch_output': pytorch_output_np,
                 'c_output': c_output_np,
                 'max_abs_error': max_abs_error,
@@ -1009,134 +726,7 @@ int main(int argc, char* argv[]) {{
             else:
                 print(f"  ⚠ High error: {max_abs_error:.4e}")
             
-            assert max_abs_error < 10.0, "Output seems completely wrong"
-    
-    # =========================================================================
-    # Dynamic Quantization ResNet Tests
-    # =========================================================================
-    
-    def test_resnet_dynamic_quant_int8(self):
-        """Test ResNet with dynamic int8 quantization on conv and linear layers."""
-        if not self._check_gcc_available():
-            pytest.skip("gcc not available")
-        
-        torch.manual_seed(42)
-        model = TinyResNet(in_channels=3, num_classes=4, channels=16)
-        model.eval()
-        
-        example_input = torch.randn(1, 3, 8, 8) * 0.5
-        input_size = 3 * 8 * 8
-        output_size = 4
-        
-        rules = [
-            DynamicQuantRuleMinMaxPerTensor(pattern=r'.*conv.*', dtype='int8'),
-            DynamicQuantRuleMinMaxPerTensor(pattern=r'.*fc.*', dtype='int8'),
-        ]
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ir_graph = compile_model(
-                model, example_input,
-                output_dir=None, verbose=False, return_ir=True
+            assert max_abs_error < tolerance, (
+                f"{test_name} exceeded tolerance: "
+                f"max_abs_error={max_abs_error:.4e}, tolerance={tolerance:.4e}"
             )
-            
-            transform = QuantizationTransform(rules)
-            quant_ir = transform.apply(ir_graph)
-            
-            printer = CPrinter(quant_ir)
-            printer.generate_all(tmpdir)
-            
-            with torch.no_grad():
-                pytorch_output = model(example_input)
-            pytorch_output_np = pytorch_output.numpy().flatten()
-            
-            # Convert NCHW to NHWC for C code
-            input_nhwc = example_input.permute(0, 2, 3, 1).numpy().flatten()
-            c_output_np = self._compile_and_run_c_model(
-                tmpdir, input_nhwc, input_size, output_size
-            )
-            
-            abs_error = np.abs(pytorch_output_np - c_output_np)
-            max_abs_error = np.max(abs_error)
-            
-            results = {
-                'test_name': 'ResNet Dynamic Quantization - int8 (conv + linear)',
-                'pytorch_output': pytorch_output_np,
-                'c_output': c_output_np,
-                'max_abs_error': max_abs_error,
-                'mean_abs_error': np.mean(abs_error),
-                'max_rel_error': np.max(abs_error / (np.abs(pytorch_output_np) + 1e-7)),
-                'mean_rel_error': np.mean(abs_error / (np.abs(pytorch_output_np) + 1e-7)),
-            }
-            
-            self._print_results(results)
-            
-            tolerance = 1e-1
-            if max_abs_error < tolerance:
-                print(f"  ✓ PASSED (max_abs_error < {tolerance})")
-            else:
-                print(f"  ⚠ High error: {max_abs_error:.4e}")
-            
-            assert max_abs_error < 10.0, "Output seems completely wrong"
-    
-    def test_resnet_dynamic_quant_int16(self):
-        """Test ResNet with dynamic int16 quantization on conv and linear layers."""
-        if not self._check_gcc_available():
-            pytest.skip("gcc not available")
-        
-        torch.manual_seed(42)
-        model = TinyResNet(in_channels=3, num_classes=4, channels=16)
-        model.eval()
-        
-        example_input = torch.randn(1, 3, 8, 8) * 0.5
-        input_size = 3 * 8 * 8
-        output_size = 4
-        
-        rules = [
-            DynamicQuantRuleMinMaxPerTensor(pattern=r'.*conv.*', dtype='int16'),
-            DynamicQuantRuleMinMaxPerTensor(pattern=r'.*fc.*', dtype='int16'),
-        ]
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ir_graph = compile_model(
-                model, example_input,
-                output_dir=None, verbose=False, return_ir=True
-            )
-            
-            transform = QuantizationTransform(rules)
-            quant_ir = transform.apply(ir_graph)
-            
-            printer = CPrinter(quant_ir)
-            printer.generate_all(tmpdir)
-            
-            with torch.no_grad():
-                pytorch_output = model(example_input)
-            pytorch_output_np = pytorch_output.numpy().flatten()
-            
-            # Convert NCHW to NHWC for C code
-            input_nhwc = example_input.permute(0, 2, 3, 1).numpy().flatten()
-            c_output_np = self._compile_and_run_c_model(
-                tmpdir, input_nhwc, input_size, output_size
-            )
-            
-            abs_error = np.abs(pytorch_output_np - c_output_np)
-            max_abs_error = np.max(abs_error)
-            
-            results = {
-                'test_name': 'ResNet Dynamic Quantization - int16 (conv + linear)',
-                'pytorch_output': pytorch_output_np,
-                'c_output': c_output_np,
-                'max_abs_error': max_abs_error,
-                'mean_abs_error': np.mean(abs_error),
-                'max_rel_error': np.max(abs_error / (np.abs(pytorch_output_np) + 1e-7)),
-                'mean_rel_error': np.mean(abs_error / (np.abs(pytorch_output_np) + 1e-7)),
-            }
-            
-            self._print_results(results)
-            
-            tolerance = 1e-1
-            if max_abs_error < tolerance:
-                print(f"  ✓ PASSED (max_abs_error < {tolerance})")
-            else:
-                print(f"  ⚠ High error: {max_abs_error:.4e}")
-            
-            assert max_abs_error < 10.0, "Output seems completely wrong"
