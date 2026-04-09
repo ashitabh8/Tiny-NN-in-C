@@ -86,68 +86,6 @@ rules = [
 
 No calibration data needed -- the compiler inspects the weights and computes optimal scale/offset automatically.
 
-### Dynamic Quantization (`DynamicQuantRuleMinMaxPerChannel`)
-
-Like `DynamicQuantRuleMinMaxPerTensor`, but computes a separate scale for each output channel. This is typically more accurate because channels with small weight magnitudes get a tighter scale.
-
-```python
-from src.pytorch_to_c.quantization import DynamicQuantRuleMinMaxPerChannel
-
-rules = [
-    DynamicQuantRuleMinMaxPerChannel(
-        pattern=r'.*conv.*',
-        dtype='int8',
-    ),
-]
-```
-
-Also requires no calibration data. See `examples/02_dynamic_quantization/per_channel.py` for a full end-to-end example.
-
-### Per-Channel Static Quantization (Depthwise / Pointwise)
-
-For depthwise-separable blocks (e.g., DeepSense-style DS-DW architectures), two dedicated rules support per-channel weight scales:
-
-```python
-from src.pytorch_to_c.quantization import (
-    StaticDepthwiseConvRule,
-    StaticPointwiseConvRule,
-)
-
-# Per-channel weight scales (one per output channel)
-dw_weight_scales = np.array([0.01, 0.015, 0.012, ...])  # shape [C]
-pw_weight_scales = np.array([0.02, 0.018, ...])          # shape [out_C]
-
-rules = [
-    StaticDepthwiseConvRule(
-        pattern=r'.*dw_conv.*',
-        dtype='int8',
-        input_scale=0.05,
-        input_offset=0,
-        weight_scale=dw_weight_scales,  # per-channel!
-        weight_offset=0,
-        output_scale=0.05,
-        output_offset=0,
-    ),
-    StaticPointwiseConvRule(
-        pattern=r'.*pw_conv.*',
-        dtype='int8',
-        input_scale=0.05,
-        input_offset=0,
-        weight_scale=pw_weight_scales,
-        weight_offset=0,
-        output_scale=0.05,
-        output_offset=0,
-    ),
-]
-```
-
-Key differences from standard `StaticQuantRule`:
-- **Depthwise rule**: quantizes input to int8, runs int8 depthwise conv with per-channel weight scales, outputs float (no output requantization).
-- **Pointwise rule**: takes float input, uses int8 weights with per-channel scales, outputs float.
-- Both use `StaticQuantRule.quantize_weights()` which supports per-channel `weight_scale` arrays.
-
-C kernels used: `depthwise_conv2d_nhwc_int8_to_float`, `conv2d_nhwc_float_input_int8_weight_per_channel`.
-
 ### Mixed Precision
 
 Different rules can target different layers with different dtypes:
@@ -187,7 +125,7 @@ quant_fc1 (int8) --> quant_fc2 (int8)
 
 ## How to Create a Custom Quantization Rule
 
-If you need a different quantization strategy (e.g., per-channel, asymmetric, calibration-based):
+If you need a different quantization strategy (e.g., asymmetric, calibration-based):
 
 1. Subclass `QuantRule` in `src/pytorch_to_c/quantization/rules.py`:
 

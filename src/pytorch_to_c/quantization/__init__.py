@@ -4,11 +4,6 @@ from .rules import (
     QuantRule,
     StaticQuantRule,
     DynamicQuantRuleMinMaxPerTensor,
-    DynamicQuantRuleMinMaxPerChannel,
-    StaticDepthwiseConvRule,
-    StaticPointwiseConvRule,
-    QATStaticDepthwiseConvRule,   # backwards-compatible alias
-    QATStaticPointwiseConvRule,   # backwards-compatible alias
 )
 from .rule_matcher import RuleMatcher
 from .graph_transform import QuantizationTransform
@@ -18,13 +13,8 @@ from .ops.quant_conv2d import StaticQuantConv2dNode, DynamicQuantConv2dNode
 
 __all__ = [
     'QuantRule',
-    'StaticQuantRule', 
+    'StaticQuantRule',
     'DynamicQuantRuleMinMaxPerTensor',
-    'DynamicQuantRuleMinMaxPerChannel',
-    'StaticDepthwiseConvRule',
-    'StaticPointwiseConvRule',
-    'QATStaticDepthwiseConvRule',
-    'QATStaticPointwiseConvRule',
     'RuleMatcher',
     'QuantizationTransform',
     'QuantizeNode',
@@ -35,4 +25,3 @@ __all__ = [
     'StaticQuantConv2dNode',
     'DynamicQuantConv2dNode',
 ]
-

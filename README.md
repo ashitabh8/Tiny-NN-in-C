@@ -53,8 +53,7 @@ Tiny-NN-in-C is designed as a modular compiler pipeline, not a one-off model con
 
 | PyTorch module / function | Status |
 |---------------------------|--------|
-| `nn.Conv2d`               | float, int8, int16, int8 per-channel |
-| `nn.Conv2d` (depthwise)   | float, int8 per-channel |
+| `nn.Conv2d`               | float, int8, int16 |
 | `nn.Linear`               | float, int8, int16 |
 | `nn.ReLU`                 | float, int8, int16 |
 | `nn.BatchNorm2d`          | float |
@@ -87,13 +86,7 @@ ir_graph = QuantizationTransform(rules).apply(ir_graph)
 CPrinter(ir_graph).generate_all("output_quant/")
 ```
 
-For depthwise-separable blocks, per-channel rules support per-channel weight scales:
-
-```python
-from src.pytorch_to_c.quantization import StaticDepthwiseConvRule, StaticPointwiseConvRule
-```
-
-See [docs/quantization.md](docs/quantization.md) for the full guide including dynamic quantization, per-channel quantization, mixed precision, and how to add custom rules.
+See [docs/quantization.md](docs/quantization.md) for the full guide including dynamic quantization, mixed precision, and how to add custom rules.
 
 ## Arduino Support
 
@@ -165,7 +158,6 @@ Each example is a self-contained, end-to-end script: train (if needed), compile 
 |---------|-------------|
 | `examples/01_float_mnist/run.py` | Train MNIST CNN, compile to float C, verify |
 | `examples/02_dynamic_quantization/per_tensor.py` | Dynamic per-tensor int8 quantization + verify |
-| `examples/02_dynamic_quantization/per_channel.py` | Dynamic per-channel int8 quantization + verify |
 | `examples/03_qat_resnet/run.py` | QAT training on TinyResNet1D, compile quantized C, verify |
 | `examples/misc/profiling_example.py` | Profiling transform demo |
 | `examples/misc/fuse_dequant_quant_demo.py` | FuseDequantQuantPass optimization demo |
