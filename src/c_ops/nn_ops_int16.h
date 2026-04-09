@@ -125,13 +125,13 @@ static inline void dense_int16(
     int16_t* y)
 {
     for (int o = 0; o < out_features; ++o) {
-        // int16*int16 products can be up to 32767^2; use int64 to prevent overflow
+        // int16*int16 can reach ~1.07e9 per product; with >2 accumulations
+        // int32 overflows. Use int64 for correctness.
         int64_t acc = 0;
         for (int i = 0; i < in_features; ++i) {
-            acc += (int32_t)x[i] * (int32_t)W[i * out_features + o];
+            acc += (int64_t)x[i] * (int64_t)W[i * out_features + o];
         }
-
-        // Dequantize: result = acc * input_scale * weight_scale
+        
         float result = (float)acc * input_scale * weight_scale;
 
         // Add bias (in float domain)
@@ -221,7 +221,6 @@ static inline void conv2d_nhwc_int16(
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             for (int oc = 0; oc < out_c; ++oc) {
-                // int16*int16 products can be up to 32767^2; use int64 to prevent overflow
                 int64_t acc = 0;
                 
                 for (int kh = 0; kh < k_h; ++kh) {
@@ -236,7 +235,7 @@ static inline void conv2d_nhwc_int16(
                         const int16_t* f_base = filt + (((kh * k_w + kw) * in_c) * out_c + oc);
                         
                         for (int ic = 0; ic < in_c; ++ic) {
-                            acc += (int32_t)in_px[ic] * (int32_t)f_base[ic * out_c];
+                            acc += (int64_t)in_px[ic] * (int64_t)f_base[ic * out_c];
                         }
                     }
                 }
@@ -255,5 +254,93 @@ static inline void conv2d_nhwc_int16(
     }
 }
 
-#endif /* NN_OPS_INT16_H_ */
+/* ==========================================================================
+ * Float-output kernels for dynamic quantization
+ *
+ * Compute in the integer domain but output float32 directly,
+ * avoiding the unnecessary requantize->dequantize round-trip.
+ * ========================================================================== */
 
+/**
+ * Dense layer: int16 weights + int16 activations -> float32 output
+ */
+static inline void dense_int16_to_float(
+    const int16_t* x,
+    int in_features,
+    const int16_t* W,
+    const float* bias,
+    int out_features,
+    float input_scale,
+    float weight_scale,
+    float* y)
+{
+    float combined_scale = input_scale * weight_scale;
+    for (int o = 0; o < out_features; ++o) {
+        int64_t acc = 0;
+        for (int i = 0; i < in_features; ++i) {
+            acc += (int64_t)x[i] * (int64_t)W[i * out_features + o];
+        }
+        float result = (float)acc * combined_scale;
+        if (bias) {
+            result += bias[o];
+        }
+        y[o] = result;
+    }
+}
+
+/**
+ * Conv2D NHWC: int16 weights + int16 activations -> float32 output
+ */
+static inline void conv2d_nhwc_int16_to_float(
+    const int16_t* in, int in_h, int in_w, int in_c,
+    const int16_t* filt, int k_h, int k_w, int out_c,
+    const float* bias,
+    int stride_h, int stride_w,
+    int pad_same,
+    float input_scale,
+    float weight_scale,
+    float* out)
+{
+    int out_h, out_w;
+    if (pad_same) {
+        out_h = (in_h + stride_h - 1) / stride_h;
+        out_w = (in_w + stride_w - 1) / stride_w;
+    } else {
+        out_h = (in_h - k_h) / stride_h + 1;
+        out_w = (in_w - k_w) / stride_w + 1;
+    }
+
+    int pad_h_total = pad_same ? ((out_h - 1) * stride_h + k_h - in_h) : 0;
+    int pad_w_total = pad_same ? ((out_w - 1) * stride_w + k_w - in_w) : 0;
+    int pad_top = pad_h_total / 2;
+    int pad_left = pad_w_total / 2;
+    float combined_scale = input_scale * weight_scale;
+
+    for (int oh = 0; oh < out_h; ++oh) {
+        for (int ow = 0; ow < out_w; ++ow) {
+            for (int oc = 0; oc < out_c; ++oc) {
+                int64_t acc = 0;
+                for (int kh = 0; kh < k_h; ++kh) {
+                    int ih = oh * stride_h + kh - pad_top;
+                    if (ih < 0 || ih >= in_h) continue;
+                    for (int kw = 0; kw < k_w; ++kw) {
+                        int iw = ow * stride_w + kw - pad_left;
+                        if (iw < 0 || iw >= in_w) continue;
+                        const int16_t* in_px = in + ((ih * in_w + iw) * in_c);
+                        const int16_t* f_base = filt + (((kh * k_w + kw) * in_c) * out_c + oc);
+                        for (int ic = 0; ic < in_c; ++ic) {
+                            acc += (int64_t)in_px[ic] * (int64_t)f_base[ic * out_c];
+                        }
+                    }
+                }
+                float result = (float)acc * combined_scale;
+                if (bias != NULL) {
+                    result += bias[oc];
+                }
+                out[((oh * out_w + ow) * out_c) + oc] = result;
+            }
+        }
+    }
+}
+
+#endif /* NN_OPS_INT16_H */

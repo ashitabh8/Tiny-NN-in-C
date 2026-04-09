@@ -191,10 +191,11 @@ class DynamicQuantConv2dNode(QuantIRNode):
     
     - Input scale: Computed at runtime from input values
     - Weight scale: Computed from weights at compile time
-    - Output scale: Uses weight_scale for dequantization
+    - Output: float32 directly (uses float-output C kernel, no requantize step)
     
-    Uses DynamicQuantizeInputNode for input (computes scale at runtime)
-    and DequantizeNode for output.
+    Uses DynamicQuantizeInputNode for input (computes scale at runtime).
+    No DequantizeNode needed — the float-output kernel avoids the
+    unnecessary requantize->dequantize round-trip.
     """
     
     def __init__(
@@ -204,15 +205,6 @@ class DynamicQuantConv2dNode(QuantIRNode):
         weight_scale: float,
         offset: int = 0
     ):
-        """
-        Initialize dynamic quantized conv2d node.
-        
-        Args:
-            original_node: The float conv2d node being quantized
-            dtype: Target data type ('int8' or 'int16')
-            weight_scale: Scale for weight quantization (computed from weights)
-            offset: Zero point offset (default 0 for symmetric)
-        """
         super().__init__(
             original_node=original_node,
             dtype=dtype,
@@ -222,43 +214,39 @@ class DynamicQuantConv2dNode(QuantIRNode):
         )
         
         self.weight_scale = weight_scale
+        self.computation_dtype = dtype
+        self.dtype = 'float32'
     
     def get_pre_nodes(self) -> List[IRNode]:
-        """
-        Insert DynamicQuantizeInputNode before this layer.
-        """
+        """Insert DynamicQuantizeInputNode before this layer."""
         from .quant_utils import DynamicQuantizeInputNode
         
         pre_node = DynamicQuantizeInputNode(
-            name=f"{self.name}_input_dq",
-            target_dtype=self.dtype,
+            name=f"{self.name}_input_dynq",
+            target_dtype=self.computation_dtype,
             output_shape=self.metadata.get('input_shape')
         )
         
         return [pre_node]
     
     def get_post_nodes(self) -> List[IRNode]:
-        """
-        Insert DequantizeNode after this layer.
-        """
-        from .quant_utils import DequantizeNode
-        
-        post_node = DequantizeNode(
-            name=f"{self.name}_output_dq",
-            source_dtype=self.dtype,
-            scale=self.weight_scale,
-            offset=self.offset,
-            output_shape=self.output_shape
-        )
-        
-        return [post_node]
+        """No post-processing: float-output kernel writes float32 directly."""
+        return []
+    
+    def get_c_dtype(self) -> str:
+        return 'float'
+    
+    def validate_input_dtypes(self) -> bool:
+        for inp in self.inputs:
+            if inp.dtype not in ['int8', 'int16']:
+                raise TypeError(
+                    f"DynamicQuantConv2dNode '{self.name}' expects quantized input, "
+                    f"got '{inp.dtype}' from '{inp.name}'"
+                )
+        return True
     
     def generate_c_code(self, c_printer) -> List[str]:
-        """
-        Generate C code for dynamic quantized conv2d.
-        
-        Input scale comes from DynamicQuantizeInputNode variable.
-        """
+        """Generate C code using float-output kernel (no requantization)."""
         lines = []
         
         input_buffer = c_printer._get_input_buffer(self, 0)
@@ -268,7 +256,6 @@ class DynamicQuantConv2dNode(QuantIRNode):
         bias_name = c_printer._sanitize_name(self.metadata['bias_name']) \
                     if self.metadata.get('bias_name') else 'NULL'
         
-        # Extract conv parameters
         kernel_size = self.metadata['kernel_size']
         stride = self.metadata['stride']
         padding = self.metadata['padding']
@@ -276,66 +263,72 @@ class DynamicQuantConv2dNode(QuantIRNode):
         out_channels = self.metadata['out_channels']
         groups = self.metadata['groups'] if 'groups' in self.metadata else 1
         
-        # Convert to scalars if tuples
         k_h, k_w = kernel_size if isinstance(kernel_size, (tuple, list)) else (kernel_size, kernel_size)
         s_h, s_w = stride if isinstance(stride, (tuple, list)) else (stride, stride)
         p_h, p_w = padding if isinstance(padding, (tuple, list)) else (padding, padding)
         
-        # Get input scale variable from DynamicQuantizeInputNode
+        pad_same = 1 if p_h > 0 or p_w > 0 else 0
+        
         input_scale_var = self._get_input_scale_variable(c_printer)
         
-        # Get input spatial dimensions from input shape
-        in_h, in_w = 32, 32  # Default
-        if self.inputs and self.inputs[0].output_shape:
-            input_shape = self.inputs[0].output_shape
-            if len(input_shape) == 4:
-                in_h, in_w = input_shape[2], input_shape[3]
+        in_h, in_w = self._get_input_spatial_dims()
         
-        is_depthwise = groups > 1 and groups == in_channels and out_channels == in_channels
-
-        if self.dtype == 'int8' and is_depthwise:
-            raise ValueError(
-                f"{self.name}: dynamic depthwise conv2d requires per-channel weight scales; "
-                "use static quantization for this path"
-            )
-        if self.dtype == 'int8':
+        if self.computation_dtype == 'int8':
             lines.append(
-                f"conv2d_nhwc_int8("
+                f"conv2d_nhwc_int8_to_float("
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-                f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
-                f"{input_scale_var}, {self.weight_scale}f, {self.weight_scale}f, {self.offset}, "
+                f"{bias_name}, {s_h}, {s_w}, {pad_same}, "
+                f"{input_scale_var}, {self.weight_scale}f, "
                 f"{output_buffer});"
             )
-        elif self.dtype == 'int16':
+        elif self.computation_dtype == 'int16':
             lines.append(
-                f"conv2d_nhwc_int16("
+                f"conv2d_nhwc_int16_to_float("
                 f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
                 f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-                f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
-                f"{input_scale_var}, {self.weight_scale}f, {self.weight_scale}f, {self.offset}, "
+                f"{bias_name}, {s_h}, {s_w}, {pad_same}, "
+                f"{input_scale_var}, {self.weight_scale}f, "
                 f"{output_buffer});"
             )
         else:
-            raise ValueError(f"Unsupported dtype: {self.dtype}")
+            raise ValueError(f"Unsupported computation dtype: {self.computation_dtype}")
         
         return lines
     
+    def _get_input_spatial_dims(self) -> tuple:
+        """Get input (H, W) from the input node's shape."""
+        if self.inputs and self.inputs[0].output_shape:
+            input_shape = self.inputs[0].output_shape
+            if len(input_shape) == 4:
+                return input_shape[2], input_shape[3]
+        raise ValueError(
+            f"DynamicQuantConv2dNode '{self.name}': cannot determine input "
+            f"spatial dimensions. Ensure input shape is available."
+        )
+    
     def _get_input_scale_variable(self, c_printer) -> str:
         """
-        Get the scale variable name from the input DynamicQuantizeInputNode.
+        Get the scale variable name from the preceding DynamicQuantizeInputNode.
+        
+        Raises ValueError if the input is not a DynamicQuantizeInputNode.
         """
         if self.inputs:
             input_node = self.inputs[0]
             if input_node.op_type == 'dynamic_quantize':
                 return f"scale_{c_printer._sanitize_name(input_node.name)}"
         
-        return f"{self.weight_scale}f"
+        raise ValueError(
+            f"DynamicQuantConv2dNode '{self.name}': expected input from "
+            f"DynamicQuantizeInputNode (op_type='dynamic_quantize'), but "
+            f"got '{self.inputs[0].op_type if self.inputs else 'none'}' "
+            f"from '{self.inputs[0].name if self.inputs else 'N/A'}'. "
+            f"Graph transform must insert DynamicQuantizeInputNode before this node."
+        )
     
     def __repr__(self) -> str:
         return (f"DynamicQuantConv2dNode(name='{self.name}', "
                 f"in_ch={self.metadata.get('in_channels')}, "
                 f"out_ch={self.metadata.get('out_channels')}, "
-                f"dtype='{self.dtype}', "
+                f"computation_dtype='{self.computation_dtype}', "
                 f"weight_scale={self.weight_scale})")
-

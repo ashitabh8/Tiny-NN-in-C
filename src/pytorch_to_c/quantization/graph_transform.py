@@ -10,6 +10,8 @@ from ..ir.quant_node import QuantIRNode
 from .rules import QuantRule
 from .rule_matcher import RuleMatcher
 from .ops.quant_utils import QuantizeNode, DequantizeNode
+from .ops.quant_linear import DynamicQuantLinearNode
+from .ops.quant_conv2d import DynamicQuantConv2dNode
 
 
 class QuantizationTransform:
@@ -319,38 +321,25 @@ class QuantizationTransform:
             ir_graph: The IR graph
             nodes_to_quantize: Dictionary mapping original node -> rule
         """
-        # We need to process the NEW quantized nodes, not the old ones
         for node in ir_graph.nodes:
-            if hasattr(node, 'scale') and hasattr(node, 'offset'):
-                # This is a quantized node
-                weight_name = node.metadata.get('weight_name')
-                if not weight_name or weight_name not in ir_graph.parameters:
-                    continue
-                
-                # Get the rule that applies to this node
-                rule = None
-                for orig_node, r in nodes_to_quantize.items():
-                    if orig_node.name == node.name:
-                        rule = r
-                        break
-                
-                if rule is None:
-                    continue
-                
-                # Get float weights
-                weights_float = ir_graph.parameters[weight_name]
-                
-                # Quantize using rule's logic
-                weights_q = rule.quantize_weights(weights_float)
-                
-                # Replace in parameters (only store quantized, not float)
-                ir_graph.parameters[weight_name] = weights_q
-
-                # Store per-channel weight scale arrays so they appear in weights.h
-                ws = getattr(node, 'weight_scale', None)
-                if ws is not None and isinstance(ws, (list, tuple, np.ndarray)):
-                    scale_name = f"{weight_name}_scale"
-                    ir_graph.parameters[scale_name] = np.asarray(ws, dtype=np.float32)
+            if not isinstance(node, QuantIRNode):
+                continue
+            weight_name = node.metadata.get('weight_name')
+            if not weight_name or weight_name not in ir_graph.parameters:
+                continue
+            
+            rule = None
+            for orig_node, r in nodes_to_quantize.items():
+                if orig_node.name == node.name:
+                    rule = r
+                    break
+            
+            if rule is None:
+                continue
+            
+            weights_float = ir_graph.parameters[weight_name]
+            weights_q = rule.quantize_weights(weights_float)
+            ir_graph.parameters[weight_name] = weights_q
     
     def _validate_graph(self, ir_graph: IRGraph):
         """
@@ -370,4 +359,3 @@ class QuantizationTransform:
                     node.validate_input_dtypes()
             except TypeError as e:
                 raise TypeError(f"Dtype validation failed for node '{node.name}': {e}")
-

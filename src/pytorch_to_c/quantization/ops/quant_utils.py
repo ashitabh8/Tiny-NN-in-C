@@ -64,9 +64,13 @@ class QuantizeNode(IRNode):
         input_buf = c_printer._get_input_buffer(self, 0)
         output_buf = c_printer._get_buffer_name(self)
         
-        # Get size from buffer size calculation
         buffer_sizes = c_printer._calculate_buffer_sizes()
-        size = buffer_sizes.get(self.name, 1024)
+        if self.name not in buffer_sizes:
+            raise ValueError(
+                f"QuantizeNode '{self.name}': buffer size unknown. "
+                f"Ensure output_shape is set (run with example_input for shape inference)."
+            )
+        size = buffer_sizes[self.name]
         
         if self.target_dtype == 'int8':
             return [
@@ -190,28 +194,27 @@ class DynamicQuantizeInputNode(IRNode):
     
     def _get_input_size(self, c_printer) -> int:
         """Get the size from the input node's shape."""
+        import math
         if self.inputs:
             input_node = self.inputs[0]
             if input_node.output_shape:
-                import math
                 shape = input_node.output_shape
-                # Remove batch dimension if present
                 if len(shape) > 0 and shape[0] == 1:
                     shape = shape[1:]
                 if len(shape) > 0:
                     return math.prod(shape)
         
-        # Fallback: try our own shape
         if self.output_shape:
-            import math
             shape = self.output_shape
             if len(shape) > 0 and shape[0] == 1:
                 shape = shape[1:]
             if len(shape) > 0:
                 return math.prod(shape)
         
-        # Last resort fallback
-        return 1024
+        raise ValueError(
+            f"DynamicQuantizeInputNode '{self.name}': cannot determine input size. "
+            f"Ensure output_shape is set (run with example_input for shape inference)."
+        )
     
     def validate_input_dtypes(self) -> bool:
         """Validate that input is float32."""
@@ -285,9 +288,13 @@ class DequantizeNode(IRNode):
         input_buf = c_printer._get_input_buffer(self, 0)
         output_buf = c_printer._get_buffer_name(self)
         
-        # Get size from buffer size calculation
         buffer_sizes = c_printer._calculate_buffer_sizes()
-        size = buffer_sizes.get(self.name, 1024)
+        if self.name not in buffer_sizes:
+            raise ValueError(
+                f"DequantizeNode '{self.name}': buffer size unknown. "
+                f"Ensure output_shape is set (run with example_input for shape inference)."
+            )
+        size = buffer_sizes[self.name]
         
         if self.source_dtype == 'int8':
             return [
