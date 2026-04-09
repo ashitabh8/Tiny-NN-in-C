@@ -80,7 +80,7 @@ def main():
         ProfilingRule(r"relu", label="relu"),
         ProfilingRule(r"fc", label="fc"),
     ]
-    ir_graph = ProfilingTransform(rules).apply(ir_graph)
+    # ir_graph = ProfilingTransform(rules).apply(ir_graph)
 
     # 4. Generate C to output_dir
     print(f"[4/4] Generating C to {output_dir}/...")

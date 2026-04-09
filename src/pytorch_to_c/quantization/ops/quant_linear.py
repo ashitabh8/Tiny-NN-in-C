@@ -147,10 +147,11 @@ class DynamicQuantLinearNode(QuantIRNode):
     
     - Input scale: Computed at runtime from input values
     - Weight scale: Computed from weights at compile time
-    - Output scale: Uses weight_scale for dequantization
+    - Output: float32 directly (uses float-output C kernel, no requantize step)
     
-    Uses DynamicQuantizeInputNode for input (computes scale at runtime)
-    and DequantizeNode for output.
+    Uses DynamicQuantizeInputNode for input (computes scale at runtime).
+    No DequantizeNode needed — the float-output kernel avoids the
+    unnecessary requantize->dequantize round-trip.
     """
     
     def __init__(
@@ -160,15 +161,6 @@ class DynamicQuantLinearNode(QuantIRNode):
         weight_scale: float,
         offset: int = 0
     ):
-        """
-        Initialize dynamic quantized linear node.
-        
-        Args:
-            original_node: The float linear node being quantized
-            dtype: Target data type ('int8' or 'int16')
-            weight_scale: Scale for weight quantization (computed from weights)
-            offset: Zero point offset (default 0 for symmetric)
-        """
         super().__init__(
             original_node=original_node,
             dtype=dtype,
@@ -178,47 +170,39 @@ class DynamicQuantLinearNode(QuantIRNode):
         )
         
         self.weight_scale = weight_scale
+        self.computation_dtype = dtype
+        self.dtype = 'float32'
     
     def get_pre_nodes(self) -> List[IRNode]:
-        """
-        Insert DynamicQuantizeInputNode before this layer.
-        
-        This node computes scale from input at runtime.
-        """
+        """Insert DynamicQuantizeInputNode before this layer."""
         from .quant_utils import DynamicQuantizeInputNode
         
         pre_node = DynamicQuantizeInputNode(
-            name=f"{self.name}_input_dq",
-            target_dtype=self.dtype,
+            name=f"{self.name}_input_dynq",
+            target_dtype=self.computation_dtype,
             output_shape=self.metadata.get('input_shape')
         )
         
         return [pre_node]
     
     def get_post_nodes(self) -> List[IRNode]:
-        """
-        Insert DequantizeNode after this layer.
-        
-        Uses weight_scale for output dequantization.
-        """
-        from .quant_utils import DequantizeNode
-        
-        post_node = DequantizeNode(
-            name=f"{self.name}_output_dq",
-            source_dtype=self.dtype,
-            scale=self.weight_scale,
-            offset=self.offset,
-            output_shape=self.output_shape
-        )
-        
-        return [post_node]
+        """No post-processing: float-output kernel writes float32 directly."""
+        return []
+    
+    def get_c_dtype(self) -> str:
+        return 'float'
+    
+    def validate_input_dtypes(self) -> bool:
+        for inp in self.inputs:
+            if inp.dtype not in ['int8', 'int16']:
+                raise TypeError(
+                    f"DynamicQuantLinearNode '{self.name}' expects quantized input, "
+                    f"got '{inp.dtype}' from '{inp.name}'"
+                )
+        return True
     
     def generate_c_code(self, c_printer) -> List[str]:
-        """
-        Generate C code for dynamic quantized linear.
-        
-        Input scale comes from DynamicQuantizeInputNode variable.
-        """
+        """Generate C code using float-output kernel (no requantization)."""
         lines = []
         
         input_buffer = c_printer._get_input_buffer(self, 0)
@@ -231,47 +215,51 @@ class DynamicQuantLinearNode(QuantIRNode):
         in_features = self.metadata['in_features']
         out_features = self.metadata['out_features']
         
-        # Get input scale variable from DynamicQuantizeInputNode
         input_scale_var = self._get_input_scale_variable(c_printer)
         
-        if self.dtype == 'int8':
+        if self.computation_dtype == 'int8':
             lines.append(
-                f"dense_int8("
+                f"dense_int8_to_float("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {bias_name}, {out_features}, "
-                f"{input_scale_var}, {self.weight_scale}f, {self.weight_scale}f, {self.offset}, "
+                f"{input_scale_var}, {self.weight_scale}f, "
                 f"{output_buffer});"
             )
-        elif self.dtype == 'int16':
+        elif self.computation_dtype == 'int16':
             lines.append(
-                f"dense_int16("
+                f"dense_int16_to_float("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {bias_name}, {out_features}, "
-                f"{input_scale_var}, {self.weight_scale}f, {self.weight_scale}f, {self.offset}, "
+                f"{input_scale_var}, {self.weight_scale}f, "
                 f"{output_buffer});"
             )
         else:
-            raise ValueError(f"Unsupported dtype: {self.dtype}")
+            raise ValueError(f"Unsupported computation dtype: {self.computation_dtype}")
         
         return lines
     
     def _get_input_scale_variable(self, c_printer) -> str:
         """
-        Get the scale variable name from the input DynamicQuantizeInputNode.
+        Get the scale variable name from the preceding DynamicQuantizeInputNode.
         
-        The input node generates: float scale_xxx = compute_dynamic_scale_int8(...);
+        Raises ValueError if the input is not a DynamicQuantizeInputNode.
         """
         if self.inputs:
             input_node = self.inputs[0]
             if input_node.op_type == 'dynamic_quantize':
                 return f"scale_{c_printer._sanitize_name(input_node.name)}"
         
-        # Fallback (shouldn't happen in correct usage)
-        return f"{self.weight_scale}f"
+        raise ValueError(
+            f"DynamicQuantLinearNode '{self.name}': expected input from "
+            f"DynamicQuantizeInputNode (op_type='dynamic_quantize'), but "
+            f"got '{self.inputs[0].op_type if self.inputs else 'none'}' "
+            f"from '{self.inputs[0].name if self.inputs else 'N/A'}'. "
+            f"Graph transform must insert DynamicQuantizeInputNode before this node."
+        )
     
     def __repr__(self) -> str:
         return (f"DynamicQuantLinearNode(name='{self.name}', "
                 f"in={self.metadata.get('in_features')}, "
                 f"out={self.metadata.get('out_features')}, "
-                f"dtype='{self.dtype}', "
+                f"computation_dtype='{self.computation_dtype}', "
                 f"weight_scale={self.weight_scale})")

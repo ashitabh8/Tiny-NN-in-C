@@ -269,338 +269,96 @@ static inline void conv2d_nhwc_int8(
     }
 }
 
-/**
- * Quantized Conv2D NHWC with per-output-channel weight scales.
+/* ============================================================================
+ * Float-output kernels for dynamic quantization
  *
- * Same as conv2d_nhwc_int8, but uses weight_scales[oc] for each output channel.
+ * These compute in the integer domain but output float32 directly,
+ * avoiding the unnecessary requantize->dequantize round-trip.
+ * ============================================================================ */
+
+/**
+ * Dense layer: int8 weights + int8 activations -> float32 output
+ *
+ * Accumulates in int32, dequantizes with input_scale * weight_scale,
+ * adds float bias, and writes float output (no requantization).
  */
-static inline void conv2d_nhwc_int8_per_channel(
+static inline void dense_int8_to_float(
+    const int8_t* x,
+    int in_features,
+    const int8_t* W,
+    const float* b,
+    int out_features,
+    float input_scale,
+    float weight_scale,
+    float* y)
+{
+    float combined_scale = input_scale * weight_scale;
+    for (int o = 0; o < out_features; ++o) {
+        int32_t acc = 0;
+        for (int i = 0; i < in_features; ++i) {
+            acc += (int32_t)x[i] * (int32_t)W[i * out_features + o];
+        }
+        float result = (float)acc * combined_scale;
+        if (b != NULL) {
+            result += b[o];
+        }
+        y[o] = result;
+    }
+}
+
+/**
+ * Conv2D NHWC: int8 weights + int8 activations -> float32 output
+ */
+static inline void conv2d_nhwc_int8_to_float(
     const int8_t* in, int in_h, int in_w, int in_c,
     const int8_t* filt, int k_h, int k_w, int out_c,
     const float* bias,
     int stride_h, int stride_w,
-    int pad_h, int pad_w,
+    int pad_same,
     float input_scale,
-    const float* weight_scales,
-    float output_scale,
-    int offset,
-    int8_t* out)
+    float weight_scale,
+    float* out)
 {
-    int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
-    int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
+    int out_h, out_w;
+    if (pad_same) {
+        out_h = (in_h + stride_h - 1) / stride_h;
+        out_w = (in_w + stride_w - 1) / stride_w;
+    } else {
+        out_h = (in_h - k_h) / stride_h + 1;
+        out_w = (in_w - k_w) / stride_w + 1;
+    }
+
+    int pad_h_total = pad_same ? ((out_h - 1) * stride_h + k_h - in_h) : 0;
+    int pad_w_total = pad_same ? ((out_w - 1) * stride_w + k_w - in_w) : 0;
+    int pad_top = pad_h_total / 2;
+    int pad_left = pad_w_total / 2;
+    float combined_scale = input_scale * weight_scale;
 
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             for (int oc = 0; oc < out_c; ++oc) {
                 int32_t acc = 0;
-
                 for (int kh = 0; kh < k_h; ++kh) {
-                    int ih = oh * stride_h + kh - pad_h;
+                    int ih = oh * stride_h + kh - pad_top;
                     if (ih < 0 || ih >= in_h) continue;
-
                     for (int kw = 0; kw < k_w; ++kw) {
-                        int iw = ow * stride_w + kw - pad_w;
+                        int iw = ow * stride_w + kw - pad_left;
                         if (iw < 0 || iw >= in_w) continue;
-
                         const int8_t* in_px = in + ((ih * in_w + iw) * in_c);
                         const int8_t* f_base = filt + (((kh * k_w + kw) * in_c) * out_c + oc);
-
                         for (int ic = 0; ic < in_c; ++ic) {
                             acc += (int32_t)in_px[ic] * (int32_t)f_base[ic * out_c];
                         }
                     }
                 }
-
-                float result = (float)acc * input_scale * weight_scales[oc];
+                float result = (float)acc * combined_scale;
                 if (bias != NULL) {
                     result += bias[oc];
                 }
-
-                out[((oh * out_w + ow) * out_c) + oc] =
-                    quantize_scalar_int8(result, output_scale, offset);
+                out[((oh * out_w + ow) * out_c) + oc] = result;
             }
         }
-    }
-}
-
-/**
- * Quantized Depthwise Conv2D NHWC - int8 weights, float32 bias
- *
- * NHWC layout: input [H, W, C], filter [K_h, K_w, C] (one kernel per channel)
- *
- * Uses int32 accumulator per channel, then dequantizes using
- * input_scale * weight_scale[channel], adds float bias, and requantizes output.
- *
- * @param in             Input int8 array [H, W, C]
- * @param in_h           Input height
- * @param in_w           Input width
- * @param channels       Number of channels
- * @param filt           Filter int8 array [K_h, K_w, C]
- * @param k_h            Kernel height
- * @param k_w            Kernel width
- * @param bias           Bias float array [C] (or NULL)
- * @param stride_h       Stride height
- * @param stride_w       Stride width
- * @param pad_h          PyTorch-style padding on each row side
- * @param pad_w          PyTorch-style padding on each column side
- * @param input_scale    Scale used to quantize input
- * @param weight_scales  Per-channel weight scales [C]
- * @param output_scale   Scale for output int8 (requantization)
- * @param offset         Zero point offset for output
- * @param out            Output int8 array [H_out, W_out, C]
- */
-static inline void depthwise_conv2d_nhwc_int8(
-    const int8_t* in,
-    int in_h,
-    int in_w,
-    int channels,
-    const int8_t* filt,
-    int k_h,
-    int k_w,
-    const float* bias,
-    int stride_h,
-    int stride_w,
-    int pad_h,
-    int pad_w,
-    float input_scale,
-    const float* weight_scales,
-    float output_scale,
-    int offset,
-    int8_t* out)
-{
-    int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
-    int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
-
-    for (int oh = 0; oh < out_h; ++oh) {
-        for (int ow = 0; ow < out_w; ++ow) {
-            for (int c = 0; c < channels; ++c) {
-                int32_t acc = 0;
-
-                for (int kh = 0; kh < k_h; ++kh) {
-                    int ih = oh * stride_h + kh - pad_h;
-                    if (ih < 0 || ih >= in_h) continue;
-
-                    for (int kw = 0; kw < k_w; ++kw) {
-                        int iw = ow * stride_w + kw - pad_w;
-                        if (iw < 0 || iw >= in_w) continue;
-
-                        const int8_t x = in[((ih * in_w + iw) * channels) + c];
-                        const int8_t w = filt[((kh * k_w + kw) * channels) + c];
-                        acc += (int32_t)x * (int32_t)w;
-                    }
-                }
-
-                float result = (float)acc * input_scale * weight_scales[c];
-                if (bias != NULL) {
-                    result += bias[c];
-                }
-                out[((oh * out_w + ow) * channels) + c] =
-                    quantize_scalar_int8(result, output_scale, offset);
-            }
-        }
-    }
-}
-
-/**
- * Depthwise Conv2D with per-channel int8 weights and float output.
- * int8 input + int8 per-channel weights -> float output.
- *
- * Useful when downstream layers expect float activations (no output requantization).
- */
-static inline void depthwise_conv2d_nhwc_int8_to_float(
-    const int8_t* in,
-    int in_h,
-    int in_w,
-    int channels,
-    const int8_t* filt,
-    int k_h,
-    int k_w,
-    const float* bias,
-    int stride_h,
-    int stride_w,
-    int pad_h,
-    int pad_w,
-    float input_scale,
-    const float* weight_scales,
-    float* out)
-{
-    int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
-    int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
-
-    for (int oh = 0; oh < out_h; ++oh) {
-        for (int ow = 0; ow < out_w; ++ow) {
-            for (int c = 0; c < channels; ++c) {
-                int32_t acc = 0;
-
-                for (int kh = 0; kh < k_h; ++kh) {
-                    int ih = oh * stride_h + kh - pad_h;
-                    if (ih < 0 || ih >= in_h) continue;
-
-                    for (int kw = 0; kw < k_w; ++kw) {
-                        int iw = ow * stride_w + kw - pad_w;
-                        if (iw < 0 || iw >= in_w) continue;
-
-                        const int8_t x = in[((ih * in_w + iw) * channels) + c];
-                        const int8_t w = filt[((kh * k_w + kw) * channels) + c];
-                        acc += (int32_t)x * (int32_t)w;
-                    }
-                }
-
-                float result = (float)acc * input_scale * weight_scales[c];
-                if (bias != NULL) {
-                    result += bias[c];
-                }
-                out[((oh * out_w + ow) * channels) + c] = result;
-            }
-        }
-    }
-}
-
-/**
- * Pointwise/general Conv2D with per-channel int8 weights and float I/O.
- * float input + int8 per-channel weights -> float output.
- */
-static inline void conv2d_nhwc_float_input_int8_weight_per_channel(
-    const float* in, int in_h, int in_w, int in_c,
-    const int8_t* filt, int k_h, int k_w, int out_c,
-    const float* bias,
-    int stride_h, int stride_w,
-    int pad_h, int pad_w,
-    const float* weight_scales,
-    float* out)
-{
-    int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
-    int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
-
-    for (int oh = 0; oh < out_h; ++oh) {
-        for (int ow = 0; ow < out_w; ++ow) {
-            for (int oc = 0; oc < out_c; ++oc) {
-                float acc = (bias != NULL) ? bias[oc] : 0.0f;
-
-                for (int kh = 0; kh < k_h; ++kh) {
-                    int ih = oh * stride_h + kh - pad_h;
-                    if (ih < 0 || ih >= in_h) continue;
-
-                    for (int kw = 0; kw < k_w; ++kw) {
-                        int iw = ow * stride_w + kw - pad_w;
-                        if (iw < 0 || iw >= in_w) continue;
-
-                        const float* in_px = in + ((ih * in_w + iw) * in_c);
-                        const int8_t* f_base = filt + (((kh * k_w + kw) * in_c) * out_c + oc);
-
-                        for (int ic = 0; ic < in_c; ++ic) {
-                            float w = (float)f_base[ic * out_c] * weight_scales[oc];
-                            acc += in_px[ic] * w;
-                        }
-                    }
-                }
-                out[((oh * out_w + ow) * out_c) + oc] = acc;
-            }
-        }
-    }
-}
-
-/* ============================================================================
- * Quantized Reductions / Pooling / View Helpers
- * ============================================================================ */
-
-/**
- * Mean over spatial dimensions (H, W) for NHWC int8 input.
- *
- * Dequantize domain:
- *   mean_float = (sum(q) * input_scale) / (H*W)
- * Requantize:
- *   out_q = quantize(mean_float, output_scale, offset)
- */
-static inline void mean_hwc_int8(
-    const int8_t* in,
-    int h,
-    int w,
-    int c,
-    float input_scale,
-    float output_scale,
-    int offset,
-    int8_t* out)
-{
-    int n = h * w;
-    for (int ch = 0; ch < c; ++ch) {
-        int32_t acc = 0;
-        for (int ih = 0; ih < h; ++ih) {
-            for (int iw = 0; iw < w; ++iw) {
-                acc += (int32_t)in[((ih * w + iw) * c) + ch];
-            }
-        }
-        float mean_val = (n > 0) ? ((float)acc * input_scale / (float)n) : 0.0f;
-        out[ch] = quantize_scalar_int8(mean_val, output_scale, offset);
-    }
-}
-
-/**
- * Mean over the last dimension of a 2D int8 tensor [rows, cols] -> [rows].
- */
-static inline void mean_last_dim_int8(
-    const int8_t* in,
-    int rows,
-    int cols,
-    float input_scale,
-    float output_scale,
-    int offset,
-    int8_t* out)
-{
-    for (int r = 0; r < rows; ++r) {
-        int32_t acc = 0;
-        const int8_t* row = in + r * cols;
-        for (int c = 0; c < cols; ++c) {
-            acc += (int32_t)row[c];
-        }
-        float mean_val = (cols > 0) ? ((float)acc * input_scale / (float)cols) : 0.0f;
-        out[r] = quantize_scalar_int8(mean_val, output_scale, offset);
-    }
-}
-
-/**
- * GlobalAveragePool2D over H and W for NHWC int8 input.
- * Thin wrapper around mean_hwc_int8.
- */
-static inline void global_average_pool_2d_int8(
-    const int8_t* in,
-    int h,
-    int w,
-    int c,
-    float input_scale,
-    float output_scale,
-    int offset,
-    int8_t* out)
-{
-    mean_hwc_int8(in, h, w, c, input_scale, output_scale, offset, out);
-}
-
-/**
- * AdaptiveAvgPool2d((1,1)) equivalent for int8 NHWC input.
- */
-static inline void adaptive_avg_pool_2d_1x1_int8(
-    const int8_t* in,
-    int in_h,
-    int in_w,
-    int in_c,
-    float input_scale,
-    float output_scale,
-    int offset,
-    int8_t* out)
-{
-    global_average_pool_2d_int8(
-        in, in_h, in_w, in_c, input_scale, output_scale, offset, out
-    );
-}
-
-/**
- * Flatten helper for int8 buffers (copy n elements).
- */
-static inline void flatten_int8(const int8_t* src, int n, int8_t* dst) {
-    for (int i = 0; i < n; ++i) {
-        dst[i] = src[i];
     }
 }
 
 #endif /* NN_OPS_INT8_H_ */
-

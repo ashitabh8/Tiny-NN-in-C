@@ -40,7 +40,7 @@ class QuantRule(ABC):
         Returns:
             True if the node name matches the pattern
         """
-        return self._compiled_pattern.match(node.name) is not None
+        return self._compiled_pattern.fullmatch(node.name) is not None
     
     @abstractmethod
     def create_quant_node(self, node):
@@ -484,13 +484,11 @@ class DynamicQuantRuleMinMaxPerTensor(QuantRule):
         """
         Compute scale and offset from weight statistics.
         
-        Uses SYMMETRIC quantization (zero_point=0) which is safer for
-        dynamic quantization because:
-        1. The same scale is used for both weights and activations
-        2. We need a scale that accommodates typical activation ranges too
+        Uses SYMMETRIC quantization (zero_point=0):
+          scale = max(|w_min|, |w_max|) / q_max
         
-        For symmetric quantization: scale = max(|min|, |max|) / (q_max)
-        We also apply a safety factor of 2x to accommodate activation ranges.
+        Activation scale is computed independently at runtime by
+        compute_dynamic_scale_int8/int16 in the C headers.
         
         Args:
             weights: Float weights as numpy array
@@ -498,7 +496,6 @@ class DynamicQuantRuleMinMaxPerTensor(QuantRule):
         Returns:
             Tuple of (scale, offset)
         """
-        # Use symmetric quantization (offset=0)
         w_absmax = max(abs(float(np.min(weights))), abs(float(np.max(weights))))
         
         if self.dtype == 'int8':
@@ -508,17 +505,11 @@ class DynamicQuantRuleMinMaxPerTensor(QuantRule):
         else:
             raise ValueError(f"Unsupported dtype: {self.dtype}")
         
-        # Apply safety factor of 2x to accommodate activation ranges
-        # (activations typically have larger range than weights)
-        safety_factor = 2.0
-        
-        # Avoid division by zero
         if w_absmax == 0:
             scale = 1.0 / q_max
         else:
-            scale = (w_absmax * safety_factor) / q_max
+            scale = w_absmax / q_max
         
-        # Symmetric quantization: offset is always 0
         offset = 0
         
         return scale, offset
