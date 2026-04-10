@@ -56,12 +56,14 @@ class QuantRule(ABC):
         pass
     
     @abstractmethod
-    def quantize_weights(self, weights: np.ndarray) -> np.ndarray:
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
         """
         Quantize weights during compilation.
         
         Args:
             weights: Float weights as numpy array
+            **kwargs: Optional context. Per-channel rules may pass
+                ``ir_graph`` and ``quant_node`` to register scale arrays.
             
         Returns:
             Quantized weights as int8 or int16 numpy array
@@ -138,7 +140,9 @@ class StaticQuantRule(QuantRule):
                 input_scale=self.input_scale,
                 weight_scale=self.weight_scale,
                 output_scale=self.output_scale,
-                offset=self.input_offset  # Use input_offset for QuantizeNode
+                input_offset=self.input_offset,
+                weight_offset=self.weight_offset,
+                output_offset=self.output_offset
             )
         elif node.op_type == 'conv2d':
             from .ops.quant_conv2d import StaticQuantConv2dNode
@@ -148,7 +152,9 @@ class StaticQuantRule(QuantRule):
                 input_scale=self.input_scale,
                 weight_scale=self.weight_scale,
                 output_scale=self.output_scale,
-                offset=self.input_offset
+                input_offset=self.input_offset,
+                weight_offset=self.weight_offset,
+                output_offset=self.output_offset
             )
         else:
             raise ValueError(
@@ -156,7 +162,7 @@ class StaticQuantRule(QuantRule):
                 f"Quantized version not implemented."
             )
     
-    def quantize_weights(self, weights: np.ndarray) -> np.ndarray:
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
         """
         Quantize weights using weight_scale and weight_offset.
         
@@ -195,6 +201,220 @@ class StaticQuantRule(QuantRule):
         return (f"StaticQuantRule(pattern='{self.pattern}', dtype='{self.dtype}', "
                 f"input_scale={self.input_scale}, weight_scale={self.weight_scale}, "
                 f"output_scale={self.output_scale})")
+
+
+def _q_max_for_dtype(dtype: str) -> float:
+    if dtype == 'int8':
+        return 127.0
+    if dtype == 'int16':
+        return 32767.0
+    raise ValueError(f"Unsupported dtype: {dtype}")
+
+
+def _symmetric_scales_last_axis(weights: np.ndarray, q_max: float) -> np.ndarray:
+    """
+    One scale per index along the last axis (output feature / output channel).
+
+    Symmetric range: scale[o] = max(|W[..., o]|) / q_max, or 1/q_max if empty.
+    """
+    oc = int(weights.shape[-1])
+    scales = np.empty(oc, dtype=np.float64)
+    for o in range(oc):
+        sl = weights[..., o]
+        amax = float(np.max(np.abs(sl))) if sl.size else 0.0
+        scales[o] = (amax / q_max) if amax > 0.0 else (1.0 / q_max)
+    return scales
+
+
+def _quantize_affine_per_last_axis(
+    weights: np.ndarray,
+    scales_1d: np.ndarray,
+    weight_offset: int,
+    dtype: str,
+) -> np.ndarray:
+    oc = weights.shape[-1]
+    assert scales_1d.shape == (oc,), (scales_1d.shape, weights.shape)
+    acc = np.zeros_like(weights, dtype=np.float64)
+    for o in range(oc):
+        acc[..., o] = np.round(weights[..., o].astype(np.float64) / scales_1d[o]) + weight_offset
+    if dtype == 'int8':
+        return np.clip(acc, -128, 127).astype(np.int8)
+    if dtype == 'int16':
+        return np.clip(acc, -32768, 32767).astype(np.int16)
+    raise ValueError(f"Unsupported dtype: {dtype}")
+
+
+class StaticPerChannelLinearQuantRule(QuantRule):
+    """
+    Static activation quantization with **symmetric per-output-column weight scales**
+    computed from float weights at compile time (absmax / q_max per column).
+
+    Activation scales/zero-points are fixed like :class:`StaticQuantRule`. A single
+    ``weight_offset`` applies to all columns (same as the C per-channel kernels).
+
+    Registers ``{weight_name}_per_channel_scales`` in ``ir_graph.parameters`` and
+    sets ``metadata['per_channel_weight_scales_param']`` on the quant node for codegen.
+    """
+
+    def __init__(
+        self,
+        pattern: str,
+        dtype: str,
+        input_scale: float,
+        input_offset: int,
+        output_scale: float,
+        output_offset: int,
+        weight_offset: int = 0,
+    ):
+        super().__init__(pattern, dtype)
+        self.input_scale = input_scale
+        self.input_offset = input_offset
+        self.output_scale = output_scale
+        self.output_offset = output_offset
+        self.weight_offset = weight_offset
+
+    def create_quant_node(self, node):
+        if node.op_type != 'linear':
+            raise ValueError(
+                f"StaticPerChannelLinearQuantRule only supports linear, got '{node.op_type}'."
+            )
+        from .ops.quant_linear import StaticPerChannelQuantLinearNode
+
+        return StaticPerChannelQuantLinearNode(
+            original_node=node,
+            dtype=self.dtype,
+            input_scale=self.input_scale,
+            output_scale=self.output_scale,
+            input_offset=self.input_offset,
+            weight_offset=self.weight_offset,
+            output_offset=self.output_offset,
+        )
+
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
+        ir_graph = kwargs.get('ir_graph')
+        quant_node = kwargs.get('quant_node')
+        if ir_graph is None or quant_node is None:
+            raise ValueError(
+                "StaticPerChannelLinearQuantRule.quantize_weights requires "
+                "ir_graph= and quant_node= (provided by QuantizationTransform)."
+            )
+        wn = quant_node.metadata.get('weight_name')
+        if not wn:
+            raise ValueError("Quant node missing metadata['weight_name']")
+
+        q_max = _q_max_for_dtype(self.dtype)
+        scales = _symmetric_scales_last_axis(weights, q_max).astype(np.float32)
+        param_name = f"{wn}_per_channel_scales"
+        ir_graph.parameters[param_name] = scales
+        quant_node.metadata['per_channel_weight_scales_param'] = param_name
+        quant_node.scale = float(np.mean(scales))
+        quant_node.metadata['quant_params']['scale'] = quant_node.scale
+
+        return _quantize_affine_per_last_axis(
+            weights, scales.astype(np.float64), self.weight_offset, self.dtype
+        )
+
+    def get_quant_params(self) -> Dict[str, Any]:
+        return {
+            'dtype': self.dtype,
+            'strategy': 'static_per_channel_linear',
+            'input_scale': self.input_scale,
+            'input_offset': self.input_offset,
+            'weight_offset': self.weight_offset,
+            'output_scale': self.output_scale,
+            'output_offset': self.output_offset,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"StaticPerChannelLinearQuantRule(pattern='{self.pattern}', dtype='{self.dtype}', "
+            f"input_scale={self.input_scale}, output_scale={self.output_scale})"
+        )
+
+
+class StaticPerChannelConvQuantRule(QuantRule):
+    """
+    Same as :class:`StaticPerChannelLinearQuantRule` but for ``conv2d`` weights in
+    ``[k_h, k_w, in_c, out_c]`` (or depthwise ``[k_h, k_w, c]``): one scale per
+    output channel along the last axis.
+
+    Emits ``conv2d_nhwc_*_per_channel`` or ``depthwise_conv2d_nhwc_*_per_channel``.
+    """
+
+    def __init__(
+        self,
+        pattern: str,
+        dtype: str,
+        input_scale: float,
+        input_offset: int,
+        output_scale: float,
+        output_offset: int,
+        weight_offset: int = 0,
+    ):
+        super().__init__(pattern, dtype)
+        self.input_scale = input_scale
+        self.input_offset = input_offset
+        self.output_scale = output_scale
+        self.output_offset = output_offset
+        self.weight_offset = weight_offset
+
+    def create_quant_node(self, node):
+        if node.op_type != 'conv2d':
+            raise ValueError(
+                f"StaticPerChannelConvQuantRule only supports conv2d, got '{node.op_type}'."
+            )
+        from .ops.quant_conv2d import StaticPerChannelQuantConv2dNode
+
+        return StaticPerChannelQuantConv2dNode(
+            original_node=node,
+            dtype=self.dtype,
+            input_scale=self.input_scale,
+            output_scale=self.output_scale,
+            input_offset=self.input_offset,
+            weight_offset=self.weight_offset,
+            output_offset=self.output_offset,
+        )
+
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
+        ir_graph = kwargs.get('ir_graph')
+        quant_node = kwargs.get('quant_node')
+        if ir_graph is None or quant_node is None:
+            raise ValueError(
+                "StaticPerChannelConvQuantRule.quantize_weights requires "
+                "ir_graph= and quant_node= (provided by QuantizationTransform)."
+            )
+        wn = quant_node.metadata.get('weight_name')
+        if not wn:
+            raise ValueError("Quant node missing metadata['weight_name']")
+
+        q_max = _q_max_for_dtype(self.dtype)
+        scales = _symmetric_scales_last_axis(weights, q_max).astype(np.float32)
+        param_name = f"{wn}_per_channel_scales"
+        ir_graph.parameters[param_name] = scales
+        quant_node.metadata['per_channel_weight_scales_param'] = param_name
+        quant_node.scale = float(np.mean(scales))
+        quant_node.metadata['quant_params']['scale'] = quant_node.scale
+
+        return _quantize_affine_per_last_axis(
+            weights, scales.astype(np.float64), self.weight_offset, self.dtype
+        )
+
+    def get_quant_params(self) -> Dict[str, Any]:
+        return {
+            'dtype': self.dtype,
+            'strategy': 'static_per_channel_conv',
+            'input_scale': self.input_scale,
+            'input_offset': self.input_offset,
+            'weight_offset': self.weight_offset,
+            'output_scale': self.output_scale,
+            'output_offset': self.output_offset,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"StaticPerChannelConvQuantRule(pattern='{self.pattern}', dtype='{self.dtype}', "
+            f"input_scale={self.input_scale}, output_scale={self.output_scale})"
+        )
 
 
 class DynamicQuantRuleMinMaxPerTensor(QuantRule):
@@ -268,7 +488,7 @@ class DynamicQuantRuleMinMaxPerTensor(QuantRule):
         else:
             raise ValueError(f"Cannot quantize {node.op_type}")
     
-    def quantize_weights(self, weights: np.ndarray) -> np.ndarray:
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
         """
         Quantize weights using min-max per-tensor.
         

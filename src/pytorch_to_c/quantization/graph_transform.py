@@ -338,7 +338,11 @@ class QuantizationTransform:
                 continue
             
             weights_float = ir_graph.parameters[weight_name]
-            weights_q = rule.quantize_weights(weights_float)
+            weights_q = rule.quantize_weights(
+                weights_float,
+                ir_graph=ir_graph,
+                quant_node=node,
+            )
             ir_graph.parameters[weight_name] = weights_q
     
     def _validate_graph(self, ir_graph: IRGraph):

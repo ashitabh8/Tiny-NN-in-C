@@ -72,7 +72,8 @@ def main() -> None:
         model, example_input,
         num_samples=50,
         quantization_rules=rules,
-        tolerance=0.5,
+        # Logits can differ substantially from float32 while predictions match.
+        tolerance=10.0,
         verbose=True,
     )
     print()

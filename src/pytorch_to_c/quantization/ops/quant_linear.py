@@ -30,7 +30,9 @@ class StaticQuantLinearNode(QuantIRNode):
         input_scale: float,
         weight_scale: float,
         output_scale: float,
-        offset: int = 0
+        input_offset: int = 0,
+        weight_offset: int = 0,
+        output_offset: int = 0
     ):
         """
         Initialize static quantized linear node.
@@ -40,21 +42,26 @@ class StaticQuantLinearNode(QuantIRNode):
             dtype: Target data type ('int8' or 'int16')
             input_scale: Scale for input activation quantization
             weight_scale: Scale for weight quantization
-            output_scale: Scale for output dequantization
-            offset: Zero point offset (default 0 for symmetric)
+            output_scale: Scale for output activation (requant + dequantize)
+            input_offset: Zero point for input (QuantizeNode)
+            weight_offset: Zero point for weights (compile-time quant)
+            output_offset: Zero point for layer output (dense requant + DequantizeNode)
         """
         # Use weight_scale as the "main" scale for QuantIRNode
         super().__init__(
             original_node=original_node,
             dtype=dtype,
             scale=weight_scale,
-            offset=offset,
+            offset=weight_offset,
             quant_strategy='static'
         )
         
         self.input_scale = input_scale
         self.weight_scale = weight_scale
         self.output_scale = output_scale
+        self.input_offset = input_offset
+        self.weight_offset = weight_offset
+        self.output_offset = output_offset
     
     def get_pre_nodes(self) -> List[IRNode]:
         """
@@ -68,7 +75,7 @@ class StaticQuantLinearNode(QuantIRNode):
             name=f"{self.name}_input_q",
             target_dtype=self.dtype,
             scale=self.input_scale,
-            offset=self.offset,
+            offset=self.input_offset,
             output_shape=self.metadata.get('input_shape')
         )
         
@@ -86,7 +93,7 @@ class StaticQuantLinearNode(QuantIRNode):
             name=f"{self.name}_output_dq",
             source_dtype=self.dtype,
             scale=self.output_scale,
-            offset=self.offset,
+            offset=self.output_offset,
             output_shape=self.output_shape
         )
         
@@ -115,7 +122,8 @@ class StaticQuantLinearNode(QuantIRNode):
                 f"dense_int8("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {bias_name}, {out_features}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, {self.offset}, "
+                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, "
+                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
                 f"{output_buffer});"
             )
         elif self.dtype == 'int16':
@@ -123,7 +131,8 @@ class StaticQuantLinearNode(QuantIRNode):
                 f"dense_int16("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {bias_name}, {out_features}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, {self.offset}, "
+                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, "
+                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
                 f"{output_buffer});"
             )
         else:
@@ -138,7 +147,87 @@ class StaticQuantLinearNode(QuantIRNode):
                 f"dtype='{self.dtype}', "
                 f"input_scale={self.input_scale}, "
                 f"weight_scale={self.weight_scale}, "
-                f"output_scale={self.output_scale})")
+                f"output_scale={self.output_scale}, "
+                f"zp_in={self.input_offset}, zp_w={self.weight_offset}, zp_out={self.output_offset})")
+
+
+class StaticPerChannelQuantLinearNode(StaticQuantLinearNode):
+    """
+    Static quantized linear with per-output-column weight scales (see C ``dense_*_per_channel``).
+
+    Weight scales are stored as a float parameter; ``metadata['per_channel_weight_scales_param']``
+    is set during ``quantize_weights`` on the transform.
+    """
+
+    def __init__(
+        self,
+        original_node: IRNode,
+        dtype: str,
+        input_scale: float,
+        output_scale: float,
+        input_offset: int = 0,
+        weight_offset: int = 0,
+        output_offset: int = 0,
+    ):
+        super().__init__(
+            original_node=original_node,
+            dtype=dtype,
+            input_scale=input_scale,
+            weight_scale=1.0,
+            output_scale=output_scale,
+            input_offset=input_offset,
+            weight_offset=weight_offset,
+            output_offset=output_offset,
+        )
+
+    def generate_c_code(self, c_printer) -> List[str]:
+        scales_param = self.metadata.get('per_channel_weight_scales_param')
+        if not scales_param:
+            raise ValueError(
+                f"StaticPerChannelQuantLinearNode '{self.name}': missing "
+                f"metadata['per_channel_weight_scales_param']. Run QuantizationTransform."
+            )
+        scales_c = c_printer._sanitize_name(scales_param)
+
+        lines = []
+        input_buffer = c_printer._get_input_buffer(self, 0)
+        output_buffer = c_printer._get_buffer_name(self)
+        weight_name = c_printer._sanitize_name(self.metadata['weight_name'])
+        bias_name = c_printer._sanitize_name(self.metadata['bias_name']) \
+                    if self.metadata.get('bias_name') else 'NULL'
+        in_features = self.metadata['in_features']
+        out_features = self.metadata['out_features']
+
+        if self.dtype == 'int8':
+            lines.append(
+                f"dense_int8_per_channel("
+                f"{input_buffer}, {in_features}, "
+                f"{weight_name}, {bias_name}, {out_features}, "
+                f"{self.input_scale}f, {scales_c}, {self.output_scale}f, "
+                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
+                f"{output_buffer});"
+            )
+        elif self.dtype == 'int16':
+            lines.append(
+                f"dense_int16_per_channel("
+                f"{input_buffer}, {in_features}, "
+                f"{weight_name}, {bias_name}, {out_features}, "
+                f"{self.input_scale}f, {scales_c}, {self.output_scale}f, "
+                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
+                f"{output_buffer});"
+            )
+        else:
+            raise ValueError(f"Unsupported dtype: {self.dtype}")
+        return lines
+
+    def __repr__(self) -> str:
+        return (f"StaticPerChannelQuantLinearNode(name='{self.name}', "
+                f"in={self.metadata.get('in_features')}, "
+                f"out={self.metadata.get('out_features')}, "
+                f"dtype='{self.dtype}', "
+                f"input_scale={self.input_scale}, "
+                f"output_scale={self.output_scale}, "
+                f"zp_in={self.input_offset}, zp_w={self.weight_offset}, zp_out={self.output_offset})")
 
 
 class DynamicQuantLinearNode(QuantIRNode):

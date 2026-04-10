@@ -17,9 +17,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.pytorch_to_c.compiler import compile_model
 from src.pytorch_to_c.codegen.c_printer import CPrinter
 from src.pytorch_to_c.quantization import (
-    StaticQuantRule, DynamicQuantRuleMinMaxPerTensor,
-    QuantizationTransform, StaticQuantLinearNode, DynamicQuantLinearNode,
-    QuantizeNode, DequantizeNode
+    StaticQuantRule,
+    StaticPerChannelLinearQuantRule,
+    DynamicQuantRuleMinMaxPerTensor,
+    QuantizationTransform,
+    StaticQuantLinearNode,
+    StaticPerChannelQuantLinearNode,
+    DynamicQuantLinearNode,
+    QuantizeNode,
+    DequantizeNode,
 )
 
 
@@ -126,6 +132,52 @@ class TestQuantizationTransform:
                 quantized_count += 1
         
         assert quantized_count >= 2, "Expected at least 2 quantized weight arrays"
+
+    def test_static_per_channel_linear_scales_and_codegen(self):
+        """Per-channel linear rule registers float scales and emits dense_*_per_channel."""
+        model = TinyMLP()
+        example_input = torch.randn(1, 784)
+        ir_graph = compile_model(
+            model=model,
+            example_input=example_input,
+            output_dir=None,
+            verbose=False,
+            return_ir=True,
+        )
+        rules = [
+            StaticPerChannelLinearQuantRule(
+                r'.*fc.*',
+                'int8',
+                input_scale=0.05,
+                input_offset=0,
+                output_scale=0.05,
+                output_offset=0,
+            ),
+        ]
+        quant_ir = QuantizationTransform(rules).apply(ir_graph)
+
+        scale_keys = [k for k in quant_ir.parameters if k.endswith('_per_channel_scales')]
+        assert len(scale_keys) >= 2
+        for k in scale_keys:
+            assert quant_ir.parameters[k].dtype == np.float32
+
+        pc_nodes = [
+            n
+            for n in quant_ir.nodes
+            if isinstance(n, StaticPerChannelQuantLinearNode)
+        ]
+        assert len(pc_nodes) == 2
+        for n in pc_nodes:
+            assert n.metadata.get('per_channel_weight_scales_param')
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            CPrinter(quant_ir).generate_all(tmpdir)
+            with open(os.path.join(tmpdir, 'model.c')) as f:
+                content = f.read()
+            assert 'dense_int8_per_channel' in content
+            with open(os.path.join(tmpdir, 'weights.h')) as f:
+                wh = f.read()
+            assert 'float' in wh and 'per_channel_scales' in wh
 
 
 class TestQuantizedCodeGeneration:

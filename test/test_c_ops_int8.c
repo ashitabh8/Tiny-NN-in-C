@@ -27,17 +27,31 @@ static int8_t ref_dense_one_out(
     float input_scale,
     float weight_scale,
     float output_scale,
-    int offset)
+    int input_zp,
+    int weight_zp,
+    int output_zp)
 {
-    int32_t acc = 0;
+    int64_t sum_qx = 0;
     for (int i = 0; i < in_features; ++i) {
-        acc += (int32_t)x[i] * (int32_t)W[i * out_features + o];
+        sum_qx += (int64_t)x[i];
     }
-    float result = (float)acc * input_scale * weight_scale;
+    int64_t zx = (int64_t)input_zp;
+    int64_t zw = (int64_t)weight_zp;
+    int64_t zp_term = zx * zw * (int64_t)in_features;
+
+    int64_t acc = 0;
+    int64_t sum_qw = 0;
+    for (int i = 0; i < in_features; ++i) {
+        int64_t wv = (int64_t)W[i * out_features + o];
+        acc += (int64_t)x[i] * wv;
+        sum_qw += wv;
+    }
+    int64_t dot_affine = acc - zw * sum_qx - zx * sum_qw + zp_term;
+    float result = (float)dot_affine * input_scale * weight_scale;
     if (b != NULL) {
         result += b[o];
     }
-    return quantize_scalar_int8(result, output_scale, offset);
+    return quantize_scalar_int8(result, output_scale, output_zp);
 }
 
 static void ref_conv2d_nhwc_int8(
@@ -49,17 +63,24 @@ static void ref_conv2d_nhwc_int8(
     float input_scale,
     float weight_scale,
     float output_scale,
-    int offset,
+    int input_zp,
+    int weight_zp,
+    int output_zp,
     int8_t* out)
 {
     int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
     int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
     float combined_scale = input_scale * weight_scale;
+    int64_t zx = (int64_t)input_zp;
+    int64_t zw = (int64_t)weight_zp;
 
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             for (int oc = 0; oc < out_c; ++oc) {
-                int32_t acc = 0;
+                int64_t acc = 0;
+                int64_t sum_qx = 0;
+                int64_t sum_qf = 0;
+                int64_t p = 0;
                 for (int kh = 0; kh < k_h; ++kh) {
                     int ih = oh * stride_h + kh - pad_h;
                     if (ih < 0 || ih >= in_h) {
@@ -74,16 +95,22 @@ static void ref_conv2d_nhwc_int8(
                         const int8_t* f_base =
                             filt + (((kh * k_w + kw) * in_c) * out_c + oc);
                         for (int ic = 0; ic < in_c; ++ic) {
-                            acc += (int32_t)in_px[ic] * (int32_t)f_base[ic * out_c];
+                            int64_t qx = (int64_t)in_px[ic];
+                            int64_t qf = (int64_t)f_base[ic * out_c];
+                            acc += qx * qf;
+                            sum_qx += qx;
+                            sum_qf += qf;
+                            p += 1;
                         }
                     }
                 }
-                float result = (float)acc * combined_scale;
+                int64_t dot_affine = acc - zw * sum_qx - zx * sum_qf + zx * zw * p;
+                float result = (float)dot_affine * combined_scale;
                 if (bias != NULL) {
                     result += bias[oc];
                 }
                 out[((oh * out_w + ow) * out_c) + oc] =
-                    quantize_scalar_int8(result, output_scale, offset);
+                    quantize_scalar_int8(result, output_scale, output_zp);
             }
         }
     }
@@ -98,15 +125,22 @@ static void ref_conv2d_nhwc_int8_per_channel(
     float input_scale,
     const float* weight_scales,
     float output_scale,
-    int offset,
+    int input_zp,
+    int weight_zp,
+    int output_zp,
     int8_t* out)
 {
     int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
     int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
+    int64_t zx = (int64_t)input_zp;
+    int64_t zw = (int64_t)weight_zp;
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             for (int oc = 0; oc < out_c; ++oc) {
-                int32_t acc = 0;
+                int64_t acc = 0;
+                int64_t sum_qx = 0;
+                int64_t sum_qf = 0;
+                int64_t p = 0;
                 for (int kh = 0; kh < k_h; ++kh) {
                     int ih = oh * stride_h + kh - pad_h;
                     if (ih < 0 || ih >= in_h) continue;
@@ -114,22 +148,65 @@ static void ref_conv2d_nhwc_int8_per_channel(
                         int iw = ow * stride_w + kw - pad_w;
                         if (iw < 0 || iw >= in_w) continue;
                         const int8_t* in_px = in + ((ih * in_w + iw) * in_c);
-                        const int8_t* f_base = filt + (((kh * k_w + kw) * in_c) * out_c + oc);
+                        const int8_t* f_base =
+                            filt + (((kh * k_w + kw) * in_c) * out_c + oc);
                         for (int ic = 0; ic < in_c; ++ic) {
-                            acc += (int32_t)in_px[ic] * (int32_t)f_base[ic * out_c];
+                            int64_t qx = (int64_t)in_px[ic];
+                            int64_t qf = (int64_t)f_base[ic * out_c];
+                            acc += qx * qf;
+                            sum_qx += qx;
+                            sum_qf += qf;
+                            p += 1;
                         }
                     }
                 }
-                float result = (float)acc * input_scale * weight_scales[oc];
+                int64_t dot_affine = acc - zw * sum_qx - zx * sum_qf + zx * zw * p;
+                float result = (float)dot_affine * input_scale * weight_scales[oc];
                 if (bias != NULL) result += bias[oc];
                 out[((oh * out_w + ow) * out_c) + oc] =
-                    quantize_scalar_int8(result, output_scale, offset);
+                    quantize_scalar_int8(result, output_scale, output_zp);
             }
         }
     }
 }
 
 static void ref_depthwise_conv2d_nhwc_int8_to_float(
+    const int8_t* in, int in_h, int in_w, int channels,
+    const int8_t* filt, int k_h, int k_w,
+    const float* bias,
+    int stride_h, int stride_w,
+    int pad_h, int pad_w,
+    float input_scale,
+    float weight_scale,
+    float* out)
+{
+    int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
+    int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
+    float combined_scale = input_scale * weight_scale;
+    for (int oh = 0; oh < out_h; ++oh) {
+        for (int ow = 0; ow < out_w; ++ow) {
+            for (int c = 0; c < channels; ++c) {
+                int32_t acc = 0;
+                for (int kh = 0; kh < k_h; ++kh) {
+                    int ih = oh * stride_h + kh - pad_h;
+                    if (ih < 0 || ih >= in_h) continue;
+                    for (int kw = 0; kw < k_w; ++kw) {
+                        int iw = ow * stride_w + kw - pad_w;
+                        if (iw < 0 || iw >= in_w) continue;
+                        const int8_t x = in[((ih * in_w + iw) * channels) + c];
+                        const int8_t w = filt[((kh * k_w + kw) * channels) + c];
+                        acc += (int32_t)x * (int32_t)w;
+                    }
+                }
+                float val = (float)acc * combined_scale;
+                if (bias != NULL) val += bias[c];
+                out[((oh * out_w + ow) * channels) + c] = val;
+            }
+        }
+    }
+}
+
+static void ref_depthwise_conv2d_nhwc_int8_to_float_per_channel(
     const int8_t* in, int in_h, int in_w, int channels,
     const int8_t* filt, int k_h, int k_w,
     const float* bias,
@@ -247,9 +324,9 @@ static void test_dense_int8_identity(void) {
     }
     float b[] = {0.0f, 0.0f};
     int8_t y[2];
-    dense_int8(x, 2, W, b, 2, sx, sw, so, off, y);
+    dense_int8(x, 2, W, b, 2, sx, sw, so, 0, 0, off, y);
     for (int o = 0; o < 2; ++o) {
-        int8_t exp = ref_dense_one_out(x, 2, W, b, 2, o, sx, sw, so, off);
+        int8_t exp = ref_dense_one_out(x, 2, W, b, 2, o, sx, sw, so, 0, 0, off);
         assert(y[o] == exp);
     }
     printf("  test_dense_int8_identity PASS\n");
@@ -282,7 +359,7 @@ static void test_dense_int8_vs_float(void) {
     }
 
     int8_t y_q[out_f];
-    dense_int8(x, in_f, W, b, out_f, sx, sw, so, off, y_q);
+    dense_int8(x, in_f, W, b, out_f, sx, sw, so, 0, 0, off, y_q);
 
     float y_float[out_f];
     dense(xf, in_f, Wf, b, out_f, y_float);
@@ -303,9 +380,9 @@ static void test_dense_int8_no_bias(void) {
     int8_t W[] = {1, 2, 3, 4};
     int8_t y[2];
     float s = 0.1f;
-    dense_int8(x, 2, W, NULL, 2, s, s, s, 0, y);
-    assert(y[0] == ref_dense_one_out(x, 2, W, NULL, 2, 0, s, s, s, 0));
-    assert(y[1] == ref_dense_one_out(x, 2, W, NULL, 2, 1, s, s, s, 0));
+    dense_int8(x, 2, W, NULL, 2, s, s, s, 0, 0, 0, y);
+    assert(y[0] == ref_dense_one_out(x, 2, W, NULL, 2, 0, s, s, s, 0, 0, 0));
+    assert(y[1] == ref_dense_one_out(x, 2, W, NULL, 2, 1, s, s, s, 0, 0, 0));
     printf("  test_dense_int8_no_bias PASS\n");
 }
 
@@ -321,10 +398,10 @@ static void test_dense_int8_saturation(void) {
     float sw = 0.01f;
     float so = 1.0f; /* large output scale -> small q values */
     int8_t y[2];
-    dense_int8(x, 8, W, NULL, 2, sx, sw, so, 0, y);
+    dense_int8(x, 8, W, NULL, 2, sx, sw, so, 0, 0, 0, y);
     /* Large MAC; verify kernel matches reference (may or may not hit int8 clamp) */
-    assert(y[0] == ref_dense_one_out(x, 8, W, NULL, 2, 0, sx, sw, so, 0));
-    assert(y[1] == ref_dense_one_out(x, 8, W, NULL, 2, 1, sx, sw, so, 0));
+    assert(y[0] == ref_dense_one_out(x, 8, W, NULL, 2, 0, sx, sw, so, 0, 0, 0));
+    assert(y[1] == ref_dense_one_out(x, 8, W, NULL, 2, 1, sx, sw, so, 0, 0, 0));
     printf("  test_dense_int8_saturation PASS\n");
 }
 
@@ -337,12 +414,38 @@ static void test_dense_int8_output_scale(void) {
     float os_a = 0.1f;
     float os_b = 0.25f;
     int8_t y1[1], y2[1];
-    dense_int8(x, 1, W, NULL, 1, is, ws, os_a, 0, y1);
-    dense_int8(x, 1, W, NULL, 1, is, ws, os_b, 0, y2);
+    dense_int8(x, 1, W, NULL, 1, is, ws, os_a, 0, 0, 0, y1);
+    dense_int8(x, 1, W, NULL, 1, is, ws, os_b, 0, 0, 0, y2);
     float f_a = dequantize_scalar_int8(y1[0], os_a, 0);
     float f_b = dequantize_scalar_int8(y2[0], os_b, 0);
     assert(fabsf(f_a - 1.0f) < 1e-5f && fabsf(f_b - 1.0f) < 1e-5f);
     printf("  test_dense_int8_output_scale PASS\n");
+}
+
+static void test_dense_int8_per_channel_uniform(void) {
+    /* Per-channel with identical scales must match dense_int8 */
+    float sx = 0.5f;
+    float sw = 0.5f;
+    float so = 0.25f;
+    int off = 0;
+    float xf[] = {1.0f, 1.5f};
+    float Wf[] = {1.0f, 0.0f, 0.0f, 1.0f};
+    int8_t x[2];
+    int8_t W[4];
+    for (int i = 0; i < 2; ++i) {
+        x[i] = quantize_scalar_int8(xf[i], sx, off);
+    }
+    for (int i = 0; i < 4; ++i) {
+        W[i] = quantize_scalar_int8(Wf[i], sw, off);
+    }
+    float b[] = {0.0f, 0.0f};
+    int8_t y_dense[2];
+    int8_t y_pc[2];
+    float wsc[2] = {sw, sw};
+    dense_int8(x, 2, W, b, 2, sx, sw, so, 0, 0, off, y_dense);
+    dense_int8_per_channel(x, 2, W, b, 2, sx, wsc, so, 0, 0, off, y_pc);
+    assert(y_dense[0] == y_pc[0] && y_dense[1] == y_pc[1]);
+    printf("  test_dense_int8_per_channel_uniform PASS\n");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -368,9 +471,9 @@ static void test_conv2d_int8_1x1(void) {
     int8_t out[4];
     int8_t ref[4];
     conv2d_nhwc_int8(in, in_h, in_w, in_c, filt, k_h, k_w, out_c, bias,
-                     1, 1, 0, 0, is, ws, os, 0, out);
+                     1, 1, 0, 0, is, ws, os, 0, 0, 0, out);
     ref_conv2d_nhwc_int8(in, in_h, in_w, in_c, filt, k_h, k_w, out_c, bias,
-                         1, 1, 0, 0, is, ws, os, 0, ref);
+                         1, 1, 0, 0, is, ws, os, 0, 0, 0, ref);
     assert(memcmp(out, ref, sizeof(out)) == 0);
     /* (0,0): 1+2=3 */
     assert(out[0] == quantize_scalar_int8(3.0f, os, 0));
@@ -392,9 +495,9 @@ static void test_conv2d_int8_3x3_pad1(void) {
     int8_t out[9];
     int8_t ref[9];
     conv2d_nhwc_int8(in, in_h, in_w, in_c, filt, k_h, k_w, out_c, bias,
-                     1, 1, 1, 1, 1.0f, 1.0f, 1.0f, 0, out);
+                     1, 1, 1, 1, 1.0f, 1.0f, 1.0f, 0, 0, 0, out);
     ref_conv2d_nhwc_int8(in, in_h, in_w, in_c, filt, k_h, k_w, out_c, bias,
-                         1, 1, 1, 1, 1.0f, 1.0f, 1.0f, 0, ref);
+                         1, 1, 1, 1, 1.0f, 1.0f, 1.0f, 0, 0, 0, ref);
     assert(memcmp(out, ref, sizeof(out)) == 0);
     printf("  test_conv2d_int8_3x3_pad1 PASS\n");
 }
@@ -428,7 +531,7 @@ static void test_conv2d_int8_vs_float(void) {
     float out_f[16];
 
     conv2d_nhwc_int8(in_q, in_h, in_w, in_c, filt_q, k_h, k_w, out_c, bias,
-                     1, 1, 0, 0, sx, sw, so, 0, out_q);
+                     1, 1, 0, 0, sx, sw, so, 0, 0, 0, out_q);
     conv2d_nhwc(in_f, in_h, in_w, in_c, filt_f, k_h, k_w, out_c, bias,
                 1, 1, 0, 0, out_f);
 
@@ -448,9 +551,9 @@ static void test_conv2d_int8_no_bias(void) {
     int8_t out[2];
     int8_t ref[2];
     conv2d_nhwc_int8(in, 1, 2, 2, filt, 1, 1, 1, NULL, 1, 1, 0, 0,
-                     1.0f, 1.0f, 1.0f, 0, out);
+                     1.0f, 1.0f, 1.0f, 0, 0, 0, out);
     ref_conv2d_nhwc_int8(in, 1, 2, 2, filt, 1, 1, 1, NULL, 1, 1, 0, 0,
-                         1.0f, 1.0f, 1.0f, 0, ref);
+                         1.0f, 1.0f, 1.0f, 0, 0, 0, ref);
     assert(memcmp(out, ref, sizeof(out)) == 0);
     printf("  test_conv2d_int8_no_bias PASS\n");
 }
@@ -469,9 +572,9 @@ static void test_conv2d_int8_stride2(void) {
     int8_t out[16];
     int8_t ref[16];
     conv2d_nhwc_int8(in, in_h, in_w, in_c, filt, k_h, k_w, out_c, NULL,
-                     2, 2, 0, 0, 1.0f, 1.0f, 1.0f, 0, out);
+                     2, 2, 0, 0, 1.0f, 1.0f, 1.0f, 0, 0, 0, out);
     ref_conv2d_nhwc_int8(in, in_h, in_w, in_c, filt, k_h, k_w, out_c, NULL,
-                         2, 2, 0, 0, 1.0f, 1.0f, 1.0f, 0, ref);
+                         2, 2, 0, 0, 1.0f, 1.0f, 1.0f, 0, 0, 0, ref);
     assert(memcmp(out, ref, (size_t)n * sizeof(int8_t)) == 0);
     /* each 2x2 sum of ones = 4 */
     for (int i = 0; i < n; ++i) {
@@ -487,9 +590,9 @@ static void test_conv2d_int8_output_scale(void) {
     float ws = 0.2f;
     int8_t o1[1], o2[1];
     conv2d_nhwc_int8(in, 1, 2, 2, filt, 1, 1, 1, NULL, 1, 1, 0, 0,
-                     is, ws, 0.05f, 0, o1);
+                     is, ws, 0.05f, 0, 0, 0, o1);
     conv2d_nhwc_int8(in, 1, 2, 2, filt, 1, 1, 1, NULL, 1, 1, 0, 0,
-                     is, ws, 0.5f, 0, o2);
+                     is, ws, 0.5f, 0, 0, 0, o2);
     float r1 = dequantize_scalar_int8(o1[0], 0.05f, 0);
     float r2 = dequantize_scalar_int8(o2[0], 0.5f, 0);
     assert(fabsf(r1 - r2) < 0.3f);
@@ -509,11 +612,11 @@ static void test_conv2d_int8_per_channel(void) {
     int8_t out[4], ref[4];
     conv2d_nhwc_int8_per_channel(
         in, in_h, in_w, in_c, filt, k_h, k_w, out_c, bias,
-        1, 1, 0, 0, 1.0f, ws, 0.1f, 0, out
+        1, 1, 0, 0, 1.0f, ws, 0.1f, 0, 0, 0, out
     );
     ref_conv2d_nhwc_int8_per_channel(
         in, in_h, in_w, in_c, filt, k_h, k_w, out_c, bias,
-        1, 1, 0, 0, 1.0f, ws, 0.1f, 0, ref
+        1, 1, 0, 0, 1.0f, ws, 0.1f, 0, 0, 0, ref
     );
     assert(memcmp(out, ref, sizeof(out)) == 0);
     printf("  test_conv2d_int8_per_channel PASS\n");
@@ -529,11 +632,10 @@ static void test_depthwise_conv2d_int8(void) {
     };
     int8_t filt[] = {1, 1}; /* 1x1 per channel */
     float bias[] = {0.0f, 0.0f};
-    float ws[] = {1.0f, 1.0f};
     int8_t out[8];
     depthwise_conv2d_nhwc_int8(
         in, in_h, in_w, c, filt, 1, 1, bias,
-        1, 1, 0, 0, 1.0f, ws, 1.0f, 0, out
+        1, 1, 0, 0, 1.0f, 1.0f, 1.0f, 0, out
     );
     assert(memcmp(out, in, sizeof(out)) == 0);
     printf("  test_depthwise_conv2d_int8 PASS\n");
@@ -549,20 +651,71 @@ static void test_depthwise_conv2d_int8_to_float(void) {
     };
     int8_t filt[] = {2, -1}; /* 1x1 */
     float bias[] = {0.5f, -0.5f};
-    float ws[] = {0.2f, 0.1f};
     float out[8], ref[8];
     depthwise_conv2d_nhwc_int8_to_float(
         in, in_h, in_w, c, filt, 1, 1, bias,
-        1, 1, 0, 0, 0.5f, ws, out
+        1, 1, 0, 0, 0.5f, 0.2f, out
     );
     ref_depthwise_conv2d_nhwc_int8_to_float(
+        in, in_h, in_w, c, filt, 1, 1, bias,
+        1, 1, 0, 0, 0.5f, 0.2f, ref
+    );
+    for (int i = 0; i < 8; ++i) {
+        assert(fabsf(out[i] - ref[i]) < TOL);
+    }
+    printf("  test_depthwise_conv2d_int8_to_float PASS\n");
+}
+
+static void test_depthwise_conv2d_int8_per_channel(void) {
+    int in_h = 2, in_w = 2, c = 2;
+    int8_t in[] = {
+        1, 2,
+        3, 4,
+        5, 6,
+        7, 8
+    };
+    int8_t filt[] = {2, 3}; /* 1x1 per channel */
+    float bias[] = {0.0f, 0.0f};
+    float ws[] = {0.5f, 0.25f};
+    int8_t out[8];
+    depthwise_conv2d_nhwc_int8_per_channel(
+        in, in_h, in_w, c, filt, 1, 1, bias,
+        1, 1, 0, 0, 1.0f, ws, 0.1f, 0, 0, 0, out
+    );
+    /* Compute reference manually:
+       For each pixel, acc[c] = in[c]*filt[c], then result = acc * 1.0 * ws[c],
+       then requantize with output_scale=0.1.
+       Pixel(0,0): ch0: 1*2=2 -> 2*0.5=1.0 -> round(1.0/0.1)+0=10
+                   ch1: 2*3=6 -> 6*0.25=1.5 -> round(1.5/0.1)+0=15 */
+    int8_t expected[] = {10, 15, 30, 30, 50, 45, 70, 60};
+    assert(memcmp(out, expected, sizeof(out)) == 0);
+    printf("  test_depthwise_conv2d_int8_per_channel PASS\n");
+}
+
+static void test_depthwise_conv2d_int8_to_float_per_channel(void) {
+    int in_h = 2, in_w = 2, c = 2;
+    int8_t in[] = {
+        1, -2,
+        3, -4,
+        5, -6,
+        7, -8
+    };
+    int8_t filt[] = {2, -1}; /* 1x1 */
+    float bias[] = {0.5f, -0.5f};
+    float ws[] = {0.2f, 0.1f};
+    float out[8], ref[8];
+    depthwise_conv2d_nhwc_int8_to_float_per_channel(
+        in, in_h, in_w, c, filt, 1, 1, bias,
+        1, 1, 0, 0, 0.5f, ws, out
+    );
+    ref_depthwise_conv2d_nhwc_int8_to_float_per_channel(
         in, in_h, in_w, c, filt, 1, 1, bias,
         1, 1, 0, 0, 0.5f, ws, ref
     );
     for (int i = 0; i < 8; ++i) {
         assert(fabsf(out[i] - ref[i]) < TOL);
     }
-    printf("  test_depthwise_conv2d_int8_to_float PASS\n");
+    printf("  test_depthwise_conv2d_int8_to_float_per_channel PASS\n");
 }
 
 static void test_conv2d_float_input_int8_weight_per_channel(void) {
@@ -678,6 +831,7 @@ int main(void) {
     test_dense_int8_no_bias();
     test_dense_int8_saturation();
     test_dense_int8_output_scale();
+    test_dense_int8_per_channel_uniform();
     test_conv2d_int8_1x1();
     test_conv2d_int8_3x3_pad1();
     test_conv2d_int8_vs_float();
@@ -687,6 +841,8 @@ int main(void) {
     test_conv2d_int8_per_channel();
     test_depthwise_conv2d_int8();
     test_depthwise_conv2d_int8_to_float();
+    test_depthwise_conv2d_int8_per_channel();
+    test_depthwise_conv2d_int8_to_float_per_channel();
     test_conv2d_float_input_int8_weight_per_channel();
     test_relu_int8();
     test_mean_hwc_int8();

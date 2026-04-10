@@ -24,17 +24,31 @@ static int16_t ref_dense_one_out_int16(
     float input_scale,
     float weight_scale,
     float output_scale,
-    int offset)
+    int input_zp,
+    int weight_zp,
+    int output_zp)
 {
-    int64_t acc = 0;
+    int64_t sum_qx = 0;
     for (int i = 0; i < in_features; ++i) {
-        acc += (int32_t)x[i] * (int32_t)W[i * out_features + o];
+        sum_qx += (int64_t)x[i];
     }
-    float result = (float)acc * input_scale * weight_scale;
+    int64_t zx = (int64_t)input_zp;
+    int64_t zw = (int64_t)weight_zp;
+    int64_t zp_term = zx * zw * (int64_t)in_features;
+
+    int64_t acc = 0;
+    int64_t sum_qw = 0;
+    for (int i = 0; i < in_features; ++i) {
+        int64_t wv = (int64_t)W[i * out_features + o];
+        acc += (int64_t)x[i] * wv;
+        sum_qw += wv;
+    }
+    int64_t dot_affine = acc - zw * sum_qx - zx * sum_qw + zp_term;
+    float result = (float)dot_affine * input_scale * weight_scale;
     if (b != NULL) {
         result += b[o];
     }
-    return quantize_float_to_int16_scalar(result, output_scale, offset);
+    return quantize_float_to_int16_scalar(result, output_scale, output_zp);
 }
 
 static void ref_conv2d_nhwc_int16(
@@ -46,17 +60,24 @@ static void ref_conv2d_nhwc_int16(
     float input_scale,
     float weight_scale,
     float output_scale,
-    int offset,
+    int input_zp,
+    int weight_zp,
+    int output_zp,
     int16_t* out)
 {
     int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
     int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
     float combined_scale = input_scale * weight_scale;
+    int64_t zx = (int64_t)input_zp;
+    int64_t zw = (int64_t)weight_zp;
 
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             for (int oc = 0; oc < out_c; ++oc) {
                 int64_t acc = 0;
+                int64_t sum_qx = 0;
+                int64_t sum_qf = 0;
+                int64_t p = 0;
                 for (int kh = 0; kh < k_h; ++kh) {
                     int ih = oh * stride_h + kh - pad_h;
                     if (ih < 0 || ih >= in_h) continue;
@@ -67,14 +88,20 @@ static void ref_conv2d_nhwc_int16(
                         const int16_t* f_base =
                             filt + (((kh * k_w + kw) * in_c) * out_c + oc);
                         for (int ic = 0; ic < in_c; ++ic) {
-                            acc += (int32_t)in_px[ic] * (int32_t)f_base[ic * out_c];
+                            int64_t qx = (int64_t)in_px[ic];
+                            int64_t qf = (int64_t)f_base[ic * out_c];
+                            acc += qx * qf;
+                            sum_qx += qx;
+                            sum_qf += qf;
+                            p += 1;
                         }
                     }
                 }
-                float result = (float)acc * combined_scale;
+                int64_t dot_affine = acc - zw * sum_qx - zx * sum_qf + zx * zw * p;
+                float result = (float)dot_affine * combined_scale;
                 if (bias != NULL) result += bias[oc];
                 out[((oh * out_w + ow) * out_c) + oc] =
-                    quantize_float_to_int16_scalar(result, output_scale, offset);
+                    quantize_float_to_int16_scalar(result, output_scale, output_zp);
             }
         }
     }
@@ -119,7 +146,7 @@ static void test_dense_int16_identity(void) {
     int16_t W[] = {1, 0, 0, 1};
     float b[] = {0.0f, 0.0f};
     int16_t y[2];
-    dense_int16(x, 2, W, b, 2, 1.0f, 1.0f, 1.0f, 0, y);
+    dense_int16(x, 2, W, b, 2, 1.0f, 1.0f, 1.0f, 0, 0, 0, y);
     assert(y[0] == 10);
     assert(y[1] == -5);
     printf("  test_dense_int16_identity PASS\n");
@@ -136,9 +163,9 @@ static void test_dense_int16_vs_reference(void) {
     };
     float b[] = {0.5f, -1.5f};
     int16_t y[2];
-    dense_int16(x, in_f, W, b, out_f, 0.1f, 0.2f, 0.05f, 0, y);
+    dense_int16(x, in_f, W, b, out_f, 0.1f, 0.2f, 0.05f, 0, 0, 0, y);
     for (int o = 0; o < out_f; ++o) {
-        int16_t exp = ref_dense_one_out_int16(x, in_f, W, b, out_f, o, 0.1f, 0.2f, 0.05f, 0);
+        int16_t exp = ref_dense_one_out_int16(x, in_f, W, b, out_f, o, 0.1f, 0.2f, 0.05f, 0, 0, 0);
         assert(y[o] == exp);
     }
     printf("  test_dense_int16_vs_reference PASS\n");
@@ -164,9 +191,9 @@ static void test_conv2d_int16_1x1_reference(void) {
     float bias[] = {0.0f};
     int16_t out[4], ref[4];
     conv2d_nhwc_int16(in, in_h, in_w, in_c, filt, 1, 1, out_c, bias,
-                      1, 1, 0, 0, 1.0f, 1.0f, 1.0f, 0, out);
+                      1, 1, 0, 0, 1.0f, 1.0f, 1.0f, 0, 0, 0, out);
     ref_conv2d_nhwc_int16(in, in_h, in_w, in_c, filt, 1, 1, out_c, bias,
-                          1, 1, 0, 0, 1.0f, 1.0f, 1.0f, 0, ref);
+                          1, 1, 0, 0, 1.0f, 1.0f, 1.0f, 0, 0, 0, ref);
     assert(memcmp(out, ref, sizeof(out)) == 0);
     printf("  test_conv2d_int16_1x1_reference PASS\n");
 }
@@ -185,7 +212,7 @@ static void test_conv2d_int16_vs_float(void) {
     quantize_float_to_int16(filt_f, 4, sw, 0, filt_q);
 
     conv2d_nhwc_int16(in_q, in_h, in_w, in_c, filt_q, k_h, k_w, out_c, bias,
-                      1, 1, 0, 0, sx, sw, so, 0, out_q);
+                      1, 1, 0, 0, sx, sw, so, 0, 0, 0, out_q);
     conv2d_nhwc(in_f, in_h, in_w, in_c, filt_f, k_h, k_w, out_c, bias,
                 1, 1, 0, 0, out_float);
     dequantize_int16_to_float(out_q, 1, so, 0, out_from_q);
