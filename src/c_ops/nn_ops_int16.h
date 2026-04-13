@@ -192,24 +192,18 @@ static inline void dense_int16_per_channel(
  * ========================================================================== */
 
 /**
- * ReLU activation for int16 data.
- * 
- * For quantized ReLU, values below zero point are clamped.
- * If offset=0, this is simply max(0, x).
- * 
- * @param x Input vector (int16)
- * @param size Number of elements
+ * ReLU activation for int16 data — in-place.
+ *
+ * For quantized ReLU, values below the zero point are clamped to the zero point.
+ * If offset=0 this is simply max(0, x).  Matches the in-place API of relu_int8.
+ *
+ * @param x      Input/output int16 array (modified in place)
+ * @param size   Number of elements
  * @param offset Zero point (values < offset become offset)
- * @param y Output vector (int16)
  */
-static inline void relu_int16(
-    const int16_t* x,
-    int size,
-    int offset,
-    int16_t* y)
-{
+static inline void relu_int16(int16_t* x, int size, int offset) {
     for (int i = 0; i < size; ++i) {
-        y[i] = (x[i] > offset) ? x[i] : offset;
+        if (x[i] < (int16_t)offset) x[i] = (int16_t)offset;
     }
 }
 
@@ -467,7 +461,11 @@ static inline void conv2d_nhwc_int16_to_float(
  * ========================================================================== */
 
 /**
- * Depthwise Conv2D NHWC int16 — per-tensor, requantized int16 output
+ * Depthwise Conv2D NHWC int16 — per-tensor, requantized int16 output.
+ *
+ * Applies the full affine zero-point correction (matches conv2d_nhwc_int16).
+ * With symmetric quantization (input_zp=weight_zp=0) the correction terms
+ * vanish and the result is identical to the naive sum.
  */
 static inline void depthwise_conv2d_nhwc_int16(
     const int16_t* in, int in_h, int in_w, int channels,
@@ -478,31 +476,43 @@ static inline void depthwise_conv2d_nhwc_int16(
     float input_scale,
     float weight_scale,
     float output_scale,
-    int offset,
+    int input_zp,
+    int weight_zp,
+    int output_zp,
     int16_t* out)
 {
     int out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
     int out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
     float combined_scale = input_scale * weight_scale;
+    int64_t zx = (int64_t)input_zp;
+    int64_t zw = (int64_t)weight_zp;
 
     for (int oh = 0; oh < out_h; ++oh) {
         for (int ow = 0; ow < out_w; ++ow) {
             for (int c = 0; c < channels; ++c) {
                 int64_t acc = 0;
+                int64_t sum_qx = 0;
+                int64_t sum_qf = 0;
+                int64_t p = 0;
                 for (int kh = 0; kh < k_h; ++kh) {
                     int ih = oh * stride_h + kh - pad_h;
                     if (ih < 0 || ih >= in_h) continue;
                     for (int kw = 0; kw < k_w; ++kw) {
                         int iw = ow * stride_w + kw - pad_w;
                         if (iw < 0 || iw >= in_w) continue;
-                        acc += (int64_t)in[((ih * in_w + iw) * channels) + c]
-                             * (int64_t)filt[((kh * k_w + kw) * channels) + c];
+                        int64_t qx = (int64_t)in[((ih * in_w + iw) * channels) + c];
+                        int64_t qf = (int64_t)filt[((kh * k_w + kw) * channels) + c];
+                        acc += qx * qf;
+                        sum_qx += qx;
+                        sum_qf += qf;
+                        p += 1;
                     }
                 }
-                float result = (float)acc * combined_scale;
+                int64_t dot_affine = acc - zw * sum_qx - zx * sum_qf + zx * zw * p;
+                float result = (float)dot_affine * combined_scale;
                 if (bias != NULL) result += bias[c];
                 out[((oh * out_w + ow) * channels) + c] =
-                    quantize_float_to_int16_scalar(result, output_scale, offset);
+                    quantize_float_to_int16_scalar(result, output_scale, output_zp);
             }
         }
     }

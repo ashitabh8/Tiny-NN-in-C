@@ -97,55 +97,87 @@ class StaticQuantConv2dNode(QuantIRNode):
     def generate_c_code(self, c_printer) -> List[str]:
         """
         Generate C code for static quantized conv2d.
-        
-        Uses conv2d_nhwc_int8/conv2d_nhwc_int16 with explicit input_scale and weight_scale.
+
+        Dispatches to depthwise_conv2d_nhwc_int8/int16 for depthwise layers
+        (groups == in_channels == out_channels) and conv2d_nhwc_int8/int16 otherwise.
         """
         lines = []
-        
+
         input_buffer = c_printer._get_input_buffer(self, 0)
         output_buffer = c_printer._get_buffer_name(self)
         weight_name = c_printer._sanitize_name(self.metadata['weight_name'])
-        
+
         bias_name = c_printer._sanitize_name(self.metadata['bias_name']) \
                     if self.metadata.get('bias_name') else 'NULL'
-        
+
         # Extract conv parameters
         kernel_size = self.metadata['kernel_size']
         stride = self.metadata['stride']
         padding = self.metadata['padding']
         in_channels = self.metadata['in_channels']
         out_channels = self.metadata['out_channels']
-        
+        groups = self.metadata.get('groups', 1)
+
         # Convert to scalars if tuples
         k_h, k_w = kernel_size if isinstance(kernel_size, (tuple, list)) else (kernel_size, kernel_size)
         s_h, s_w = stride if isinstance(stride, (tuple, list)) else (stride, stride)
         p_h, p_w = padding if isinstance(padding, (tuple, list)) else (padding, padding)
-        
+
         in_h, in_w = self._get_input_spatial_dims()
 
-        if self.dtype == 'int8':
-            lines.append(
-                f"conv2d_nhwc_int8("
-                f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
-                f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-                f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, "
-                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
-                f"{output_buffer});"
-            )
-        elif self.dtype == 'int16':
-            lines.append(
-                f"conv2d_nhwc_int16("
-                f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
-                f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
-                f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, "
-                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
-                f"{output_buffer});"
-            )
+        is_depthwise = (
+            groups > 1
+            and groups == in_channels
+            and out_channels == in_channels
+        )
+
+        if is_depthwise:
+            if self.dtype == 'int8':
+                lines.append(
+                    f"depthwise_conv2d_nhwc_int8("
+                    f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
+                    f"{weight_name}, {k_h}, {k_w}, "
+                    f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+                    f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, "
+                    f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
+                    f"{output_buffer});"
+                )
+            elif self.dtype == 'int16':
+                lines.append(
+                    f"depthwise_conv2d_nhwc_int16("
+                    f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
+                    f"{weight_name}, {k_h}, {k_w}, "
+                    f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+                    f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, "
+                    f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
+                    f"{output_buffer});"
+                )
+            else:
+                raise ValueError(f"Unsupported dtype: {self.dtype}")
         else:
-            raise ValueError(f"Unsupported dtype: {self.dtype}")
-        
+            if self.dtype == 'int8':
+                lines.append(
+                    f"conv2d_nhwc_int8("
+                    f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
+                    f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
+                    f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+                    f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, "
+                    f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
+                    f"{output_buffer});"
+                )
+            elif self.dtype == 'int16':
+                lines.append(
+                    f"conv2d_nhwc_int16("
+                    f"{input_buffer}, {in_h}, {in_w}, {in_channels}, "
+                    f"{weight_name}, {k_h}, {k_w}, {out_channels}, "
+                    f"{bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+                    f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, "
+                    f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
+                    f"{output_buffer});"
+                )
+            else:
+                raise ValueError(f"Unsupported dtype: {self.dtype}")
+
         return lines
 
     def _get_input_spatial_dims(self) -> tuple:

@@ -761,14 +761,15 @@ class CPrinter:
         s_h, s_w = stride if isinstance(stride, (tuple, list)) else (stride, stride)
         p_h, p_w = padding if isinstance(padding, (tuple, list)) else (padding, padding)
         
-        # Get input shape from the input node
-        in_h, in_w = 32, 32  # Default
-        if node.inputs and node.inputs[0].output_shape:
-            input_shape = node.inputs[0].output_shape
-            # Shape is [B, C, H, W] in NCHW or [B, H, W, C] in NHWC
-            if len(input_shape) == 4:
-                # Assume NCHW from PyTorch
-                in_h, in_w = input_shape[2], input_shape[3]
+        # Get input shape from the input node — require 4D NCHW shape
+        if not (node.inputs
+                and node.inputs[0].output_shape
+                and len(node.inputs[0].output_shape) == 4):
+            raise ValueError(
+                f"{node.name} (conv2d): input shape unavailable; "
+                f"run compile_model with example_input so spatial dims can be determined"
+            )
+        in_h, in_w = node.inputs[0].output_shape[2], node.inputs[0].output_shape[3]
         
         if groups > 1:
             if groups != in_channels or out_channels != in_channels:

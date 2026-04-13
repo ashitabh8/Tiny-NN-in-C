@@ -504,3 +504,26 @@ Follow the profiling module pattern:
 - **NCHW → NHWC**: PyTorch uses NCHW. The generated C uses NHWC. Users must permute input before calling `model_forward()`.
 - **No dynamic allocation**: All buffers are stack-allocated in `model_forward()`. Very large models may overflow the stack on constrained devices.
 - **Batch size 1 only**: The compiler strips the batch dimension. Generated C always processes a single sample.
+
+---
+
+## 14. Known Issues and Limitations
+
+### Quantization
+
+**`softmax` ignores `dim`**
+The generated C always calls `softmax(buffer, total_size)` over the entire flat buffer, regardless of the `dim` argument passed to `nn.Softmax`. For the typical use case (softmax over logits at the final output layer) this is correct. For `nn.Softmax(dim=0)` or any non-flat application, results will be wrong. There is no error or warning.
+
+**`mean_hwc_int8` / `mean_last_dim_int8` assume symmetric input quantization**
+Both kernels in `nn_ops_int8.h` (and their int16 counterparts) dequantize with a hardcoded zero-point of 0 — there is no `input_zp` parameter. They accept an `output_zp` (for requantization) but silently ignore any non-zero input zero-point. These kernels are only called correctly with symmetric (zero-centered) activations. If asymmetric input quantization were introduced, results would be silently wrong.
+
+**Per-channel weight zero-point is always treated as a single global value**
+`dense_int8_per_channel`, `conv2d_nhwc_int8_per_channel`, and their int16/depthwise counterparts use per-channel weight *scales* but a single shared `weight_zp` in the affine correction terms. This is mathematically inconsistent if per-channel zero-points differ. In practice all rules in this compiler use symmetric weight quantization (`weight_zp = 0`), so the affine correction term is zero and results are correct. If someone supplies `weight_zp != 0` with a per-channel rule, results will be wrong.
+
+### Code Generation
+
+**`relu_int8` / `relu_int16` are never called from the generated C**
+Both kernels exist in the C headers but the codegen always emits float `relu()` (in-place). This is by design: in the current quantization pipeline, ReLU always operates on float32 data because it follows a `DequantizeNode`. If a future change inserts ReLU inside a quantized block (between quantized ops, without a dequantize), the codegen would silently call float `relu()` on an integer buffer, producing garbage. The fix at that point is to add `op_type == 'relu'` handling in `_generate_node_code` that inspects `node.dtype` and dispatches to the right kernel.
+
+**Generated `model_forward` is not thread-safe or reentrant**
+Intermediate activation buffers (`slot_0`, `slot_1`, …) are declared `static` inside `model_forward`. This prevents stack overflow on constrained devices (the primary target), but means the function cannot be called concurrently from multiple threads or from an interrupt handler — all calls share the same buffers. For single-threaded bare-metal use this is not a concern.
