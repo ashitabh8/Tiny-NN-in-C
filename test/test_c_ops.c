@@ -130,6 +130,43 @@ static void test_permute_4d_nchw_to_nhwc(void) {
     printf("  test_permute_4d_nchw_to_nhwc PASS\n");
 }
 
+static void test_permute_3d_swap_last_two(void) {
+    /* [d0=2, d1=2, d2=3] permuted with [0, 2, 1] -> [d0=2, d2=3, d1=2] */
+    float in[12] = {
+        /* d0=0 */
+        1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f,
+        /* d0=1 */
+        10.0f, 20.0f, 30.0f,
+        40.0f, 50.0f, 60.0f
+    };
+    float out[12];
+    permute_3d(in, 2, 2, 3, 0, 2, 1, out);
+    /* For d0=0: in[d1, d2] -> out[d2, d1]
+       out[0,0,0]=in[0,0,0]=1, out[0,0,1]=in[0,1,0]=4
+       out[0,1,0]=in[0,0,1]=2, out[0,1,1]=in[0,1,1]=5
+       out[0,2,0]=in[0,0,2]=3, out[0,2,1]=in[0,1,2]=6 */
+    float exp[12] = {
+        1.0f, 4.0f, 2.0f, 5.0f, 3.0f, 6.0f,
+        10.0f, 40.0f, 20.0f, 50.0f, 30.0f, 60.0f
+    };
+    for (int i = 0; i < 12; ++i) {
+        assert(fabsf(out[i] - exp[i]) < TOL);
+    }
+    printf("  test_permute_3d_swap_last_two PASS\n");
+}
+
+static void test_permute_3d_identity(void) {
+    /* perm [0,1,2] is identity */
+    float in[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    float out[6];
+    permute_3d(in, 1, 2, 3, 0, 1, 2, out);
+    for (int i = 0; i < 6; ++i) {
+        assert(fabsf(out[i] - in[i]) < TOL);
+    }
+    printf("  test_permute_3d_identity PASS\n");
+}
+
 static void test_softmax(void) {
     float x[] = {1.0f, 2.0f, 3.0f};
     softmax(x, 3);
@@ -180,6 +217,8 @@ int main(void) {
     test_conv2d_nhwc_1x1();
     test_depthwise_conv2d_nhwc_identity();
     test_permute_4d_nchw_to_nhwc();
+    test_permute_3d_swap_last_two();
+    test_permute_3d_identity();
     test_softmax();
     test_mean_helpers();
     test_global_average_pool_2d();

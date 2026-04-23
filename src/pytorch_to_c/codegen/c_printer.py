@@ -606,7 +606,9 @@ class CPrinter:
                 sizes[node.name] = node.metadata['out_features']
             elif node.op_type == 'conv2d':
                 raise ValueError(f"{node.name} (conv2d): missing output_shape; run with example_input for shape inference")
-            elif node.op_type in ['relu', 'softmax', 'batchnorm']:
+            elif node.op_type == 'conv1d':
+                raise ValueError(f"{node.name} (conv1d): missing output_shape; run with example_input for shape inference")
+            elif node.op_type in ['relu', 'softmax', 'batchnorm', 'batchnorm1d']:
                 if not node.inputs:
                     raise ValueError(f"{node.name} ({node.op_type}): no input node")
                 input_size = self._node_buffer_size(sizes, node.inputs[0])
@@ -693,15 +695,21 @@ class CPrinter:
         # Built-in float operations (nodes without custom generate_c_code)
         if node.op_type == 'conv2d':
             return self._generate_conv2d(node)
-        
+
+        elif node.op_type == 'conv1d':
+            return self._generate_conv1d(node)
+
         elif node.op_type == 'linear':
             return self._generate_linear(node)
-        
+
         elif node.op_type == 'relu':
             return self._generate_relu(node)
-        
+
         elif node.op_type == 'batchnorm':
             return self._generate_batchnorm(node)
+
+        elif node.op_type == 'batchnorm1d':
+            return self._generate_batchnorm1d(node)
         
         elif node.op_type == 'softmax':
             return self._generate_softmax(node)
@@ -716,6 +724,8 @@ class CPrinter:
             return self._generate_adaptive_avg_pool(node)
 
         elif node.op_type == 'mul':
+            if node.output_shape is None:
+                return []  # FX shape-arithmetic mul (e.g., C * S in reshape args)
             return self._generate_mul(node)
 
         elif node.op_type in ('method_view', 'method_flatten', 'method_reshape'):
@@ -793,6 +803,55 @@ class CPrinter:
         
         return lines
     
+    def _generate_conv1d(self, node: IRNode) -> List[str]:
+        """Generate code for Conv1d as a Conv2d call with H=1."""
+        lines = []
+
+        input_buffer = self._get_input_buffer(node, 0)
+        output_buffer = self._get_buffer_name(node)
+        weight_name = self._sanitize_name(node.metadata['weight_name'])
+        bias_name = self._sanitize_name(node.metadata['bias_name']) if node.metadata.get('bias_name') else 'NULL'
+
+        kernel_size = node.metadata['kernel_size']
+        stride = node.metadata['stride']
+        padding = node.metadata['padding']
+        in_channels = node.metadata['in_channels']
+        out_channels = node.metadata['out_channels']
+        groups = node.metadata['groups'] if 'groups' in node.metadata else 1
+
+        k_w = int(kernel_size[0]) if isinstance(kernel_size, (tuple, list)) else int(kernel_size)
+        s_w = int(stride[0]) if isinstance(stride, (tuple, list)) else int(stride)
+        p_w = int(padding[0]) if isinstance(padding, (tuple, list)) else int(padding)
+
+        if not (node.inputs
+                and node.inputs[0].output_shape
+                and len(node.inputs[0].output_shape) == 3):
+            raise ValueError(
+                f"{node.name} (conv1d): input shape unavailable; "
+                f"expected 3D [B, C, L]; run compile_model with example_input"
+            )
+        in_w = int(node.inputs[0].output_shape[2])
+
+        if groups > 1:
+            if groups != in_channels or out_channels != in_channels:
+                raise ValueError(
+                    f"{node.name}: grouped Conv1d only supported as depthwise "
+                    f"(groups==in==out), got groups={groups}, in={in_channels}, out={out_channels}"
+                )
+            lines.append(
+                f"depthwise_conv2d_nhwc({input_buffer}, 1, {in_w}, {in_channels}, "
+                f"{weight_name}, 1, {k_w}, {bias_name}, "
+                f"1, {s_w}, 0, {p_w}, {output_buffer});"
+            )
+        else:
+            lines.append(
+                f"conv2d_nhwc({input_buffer}, 1, {in_w}, {in_channels}, "
+                f"{weight_name}, 1, {k_w}, {out_channels}, "
+                f"{bias_name}, 1, {s_w}, 0, {p_w}, {output_buffer});"
+            )
+
+        return lines
+
     def _generate_linear(self, node: IRNode) -> List[str]:
         """Generate code for Linear operation."""
         lines = []
@@ -867,6 +926,33 @@ class CPrinter:
         
         return lines
     
+    def _generate_batchnorm1d(self, node: IRNode) -> List[str]:
+        """BatchNorm1d → batchnorm2d_nhwc with h=1, w=L, c=C."""
+        lines = []
+
+        input_buffer = self._get_input_buffer(node, 0)
+        output_buffer = self._get_buffer_name(node)
+        gamma_name = self._sanitize_name(node.metadata['gamma_name'])
+        beta_name = self._sanitize_name(node.metadata['beta_name'])
+        mean_name = self._sanitize_name(node.metadata['mean_name'])
+        var_name = self._sanitize_name(node.metadata['var_name'])
+        eps = node.metadata['eps']
+        num_features = node.metadata['num_features']
+
+        if not (node.inputs and node.inputs[0].output_shape and len(node.inputs[0].output_shape) == 3):
+            raise ValueError(
+                f"{node.name} (batchnorm1d): expected 3D input shape [B, C, L]; "
+                f"run compile_model with example_input"
+            )
+        L = int(node.inputs[0].output_shape[2])
+
+        lines.append(
+            f"batchnorm2d_nhwc({input_buffer}, 1, {L}, {num_features}, "
+            f"{gamma_name}, {beta_name}, {mean_name}, {var_name}, "
+            f"{eps}f, {output_buffer});"
+        )
+        return lines
+
     def _generate_softmax(self, node: IRNode) -> List[str]:
         """Generate code for Softmax operation."""
         lines = []
@@ -1144,6 +1230,13 @@ class CPrinter:
             raise ValueError(
                 f"{node.name} (method_permute): perm rank mismatch, perm={perm_args}, shape={raw_shape}"
             )
+
+        if len(dims) == 3:
+            lines.append(
+                f"permute_3d({input_buffer}, {dims[0]}, {dims[1]}, {dims[2]}, "
+                f"{perm[0]}, {perm[1]}, {perm[2]}, {output_buffer});"
+            )
+            return lines
 
         while len(dims) < 4:
             dims.append(1)

@@ -142,15 +142,26 @@ class Lowering:
         module = fx_graph_module.get_submodule(fx_node.target)
         module_type = type(module).__name__
         
+        # Dropout layers are identity in eval mode — rewire consumers to the
+        # dropout's input and emit no IR node.
+        if isinstance(module, (torch.nn.Dropout, torch.nn.Dropout2d, torch.nn.Dropout3d)):
+            input_arg = fx_node.args[0] if fx_node.args else None
+            self.node_map[fx_node] = self.node_map.get(input_arg)
+            return None
+
         # Map module type to IR op type
         if isinstance(module, torch.nn.Conv2d):
             ir_node = self._lower_conv2d(fx_node, module)
+        elif isinstance(module, torch.nn.Conv1d):
+            ir_node = self._lower_conv1d(fx_node, module)
         elif isinstance(module, torch.nn.Linear):
             ir_node = self._lower_linear(fx_node, module)
         elif isinstance(module, torch.nn.ReLU):
             ir_node = self._lower_relu(fx_node, module)
         elif isinstance(module, torch.nn.BatchNorm2d):
             ir_node = self._lower_batchnorm2d(fx_node, module)
+        elif isinstance(module, torch.nn.BatchNorm1d):
+            ir_node = self._lower_batchnorm1d(fx_node, module)
         elif isinstance(module, torch.nn.Softmax):
             ir_node = self._lower_softmax(fx_node, module)
         elif isinstance(module, torch.nn.AdaptiveAvgPool2d):
@@ -243,6 +254,76 @@ class Lowering:
         )
         return ir_node
     
+    @staticmethod
+    def _normalize_conv1d_padding(module: torch.nn.Conv1d) -> int:
+        padding = module.padding
+        if isinstance(padding, str):
+            pl = padding.lower()
+            if pl == "valid":
+                return 0
+            if pl == "same":
+                k = module.kernel_size[0] if isinstance(module.kernel_size, tuple) else int(module.kernel_size)
+                s = module.stride[0] if isinstance(module.stride, tuple) else int(module.stride)
+                d = module.dilation[0] if isinstance(module.dilation, tuple) else int(module.dilation)
+                eff_k = (k - 1) * d + 1
+                pad_total = max(eff_k - s, 0)
+                return pad_total // 2
+            raise ValueError(f"Unsupported Conv1d padding string: {padding}")
+        if isinstance(padding, int):
+            return padding
+        if isinstance(padding, tuple) and len(padding) == 1:
+            return int(padding[0])
+        raise ValueError(f"Unsupported Conv1d padding format: {padding}")
+
+    def _lower_conv1d(
+        self,
+        fx_node: fx.Node,
+        module: torch.nn.Conv1d
+    ) -> IRNode:
+        """Lower a Conv1d module. Codegen will emit it as conv2d_nhwc with H=1."""
+        weight = module.weight.detach().cpu().numpy()  # [out_c, in_c/groups, k]
+        bias = module.bias.detach().cpu().numpy() if module.bias is not None else None
+
+        groups = int(module.groups)
+        in_channels = int(module.in_channels)
+        out_channels = int(module.out_channels)
+        is_depthwise = groups > 1 and groups == in_channels and out_channels == in_channels
+
+        # Reshape weights for the H=1 wrapper:
+        # standard:  [out_c, in_c, k] -> HWIO [1, k, in_c, out_c]
+        # depthwise: [c, 1, k]        -> HWC  [1, k, c]
+        if is_depthwise:
+            weight_packed = np.transpose(weight[:, 0, :], (1, 0))[None, :, :]  # [1, k, c]
+        else:
+            weight_packed = np.transpose(weight, (2, 1, 0))[None, :, :, :]      # [1, k, in_c, out_c]
+
+        weight_name = f"{fx_node.name}_weight"
+        self.ir_graph.add_parameter(weight_name, weight_packed)
+        if bias is not None:
+            bias_name = f"{fx_node.name}_bias"
+            self.ir_graph.add_parameter(bias_name, bias)
+
+        kernel_size = module.kernel_size[0] if isinstance(module.kernel_size, tuple) else int(module.kernel_size)
+        stride = module.stride[0] if isinstance(module.stride, tuple) else int(module.stride)
+        padding = self._normalize_conv1d_padding(module)
+
+        ir_node = IRNode(
+            name=fx_node.name,
+            op_type='conv1d',
+            dtype='float32',
+            metadata={
+                'weight_name': weight_name,
+                'bias_name': f"{fx_node.name}_bias" if bias is not None else None,
+                'kernel_size': kernel_size,
+                'stride': stride,
+                'padding': padding,
+                'in_channels': in_channels,
+                'out_channels': out_channels,
+                'groups': groups,
+            }
+        )
+        return ir_node
+
     def _lower_linear(
         self,
         fx_node: fx.Node,
@@ -331,6 +412,42 @@ class Lowering:
         )
         return ir_node
     
+    def _lower_batchnorm1d(
+        self,
+        fx_node: fx.Node,
+        module: torch.nn.BatchNorm1d
+    ) -> IRNode:
+        """Lower BatchNorm1d. Codegen emits batchnorm2d_nhwc with h=1."""
+        gamma = module.weight.detach().cpu().numpy() if module.weight is not None else np.ones(module.num_features)
+        beta = module.bias.detach().cpu().numpy() if module.bias is not None else np.zeros(module.num_features)
+        mean = module.running_mean.detach().cpu().numpy()
+        var = module.running_var.detach().cpu().numpy()
+
+        gamma_name = f"{fx_node.name}_gamma"
+        beta_name = f"{fx_node.name}_beta"
+        mean_name = f"{fx_node.name}_mean"
+        var_name = f"{fx_node.name}_var"
+
+        self.ir_graph.add_parameter(gamma_name, gamma)
+        self.ir_graph.add_parameter(beta_name, beta)
+        self.ir_graph.add_parameter(mean_name, mean)
+        self.ir_graph.add_parameter(var_name, var)
+
+        ir_node = IRNode(
+            name=fx_node.name,
+            op_type='batchnorm1d',
+            dtype='float32',
+            metadata={
+                'gamma_name': gamma_name,
+                'beta_name': beta_name,
+                'mean_name': mean_name,
+                'var_name': var_name,
+                'eps': module.eps,
+                'num_features': module.num_features,
+            }
+        )
+        return ir_node
+
     def _lower_softmax(
         self,
         fx_node: fx.Node,

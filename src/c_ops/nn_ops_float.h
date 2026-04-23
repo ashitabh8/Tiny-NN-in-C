@@ -129,6 +129,43 @@ static inline void permute_4d(
     }
 }
 
+// Generic 3D permute for contiguous float buffers.
+// Input shape [D0, D1, D2], output shape [Dperm0, Dperm1, Dperm2].
+// perm entries must be a permutation of {0,1,2}.
+static inline void permute_3d(
+    const float* in,
+    int d0, int d1, int d2,
+    int p0, int p1, int p2,
+    float* out)
+{
+    int dims[3] = {d0, d1, d2};
+    int out_d0 = dims[p0];
+    int out_d1 = dims[p1];
+    int out_d2 = dims[p2];
+
+    int in_s0 = d1 * d2;
+    int in_s1 = d2;
+
+    int out_s0 = out_d1 * out_d2;
+    int out_s1 = out_d2;
+
+    for (int i0 = 0; i0 < out_d0; ++i0) {
+        for (int i1 = 0; i1 < out_d1; ++i1) {
+            for (int i2 = 0; i2 < out_d2; ++i2) {
+                int idx_out = i0 * out_s0 + i1 * out_s1 + i2;
+
+                int src[3];
+                src[p0] = i0;
+                src[p1] = i1;
+                src[p2] = i2;
+
+                int idx_in = src[0] * in_s0 + src[1] * in_s1 + src[2];
+                out[idx_out] = in[idx_in];
+            }
+        }
+    }
+}
+
 // ReLU
 static inline void relu(float* x, int n) {
     for (int i = 0; i < n; ++i) x[i] = x[i] > 0.0f ? x[i] : 0.0f;
@@ -221,7 +258,10 @@ static inline void mean_hwc(const float* in, int h, int w, int c, float* out) {
     }
 }
 
-// Mean over the last dimension of a 2D tensor [rows, cols] -> [rows].
+// Mean over the last dimension of an N-D tensor in flat row-major memory.
+// Pass rows = product(leading dims), cols = last dim. Output is a flat buffer
+// of size `rows`. Works for any rank >= 2 because reducing the last axis is
+// shape-agnostic in row-major memory.
 static inline void mean_last_dim(const float* in, int rows, int cols, float* out) {
     for (int r = 0; r < rows; ++r) {
         float acc = 0.0f;

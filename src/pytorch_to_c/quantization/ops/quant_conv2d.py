@@ -110,20 +110,11 @@ class StaticQuantConv2dNode(QuantIRNode):
         bias_name = c_printer._sanitize_name(self.metadata['bias_name']) \
                     if self.metadata.get('bias_name') else 'NULL'
 
-        # Extract conv parameters
-        kernel_size = self.metadata['kernel_size']
-        stride = self.metadata['stride']
-        padding = self.metadata['padding']
         in_channels = self.metadata['in_channels']
         out_channels = self.metadata['out_channels']
         groups = self.metadata.get('groups', 1)
 
-        # Convert to scalars if tuples
-        k_h, k_w = kernel_size if isinstance(kernel_size, (tuple, list)) else (kernel_size, kernel_size)
-        s_h, s_w = stride if isinstance(stride, (tuple, list)) else (stride, stride)
-        p_h, p_w = padding if isinstance(padding, (tuple, list)) else (padding, padding)
-
-        in_h, in_w = self._get_input_spatial_dims()
+        k_h, k_w, s_h, s_w, p_h, p_w, in_h, in_w = self._unpack_conv_dims_h1_wrap()
 
         is_depthwise = (
             groups > 1
@@ -181,11 +172,7 @@ class StaticQuantConv2dNode(QuantIRNode):
         return lines
 
     def _get_input_spatial_dims(self) -> tuple:
-        """
-        NCHW spatial H, W from the quantized input's predecessor (float) shape.
-
-        Requires shape inference (example_input at compile time). No defaults.
-        """
+        """NCHW (H, W) for Conv2d, or (1, L) for Conv1d via H=1 wrap."""
         if not self.inputs:
             raise ValueError(
                 f"StaticQuantConv2dNode '{self.name}': no input node; graph is invalid."
@@ -194,15 +181,38 @@ class StaticQuantConv2dNode(QuantIRNode):
         if not input_node.output_shape:
             raise ValueError(
                 f"StaticQuantConv2dNode '{self.name}': input '{input_node.name}' has no "
-                f"output_shape. Compile with example_input so NCHW dimensions are known."
+                f"output_shape. Compile with example_input so dimensions are known."
             )
         input_shape = input_node.output_shape
-        if len(input_shape) != 4:
-            raise ValueError(
-                f"StaticQuantConv2dNode '{self.name}': expected 4D NCHW shape from "
-                f"'{input_node.name}', got {input_shape!r}."
-            )
-        return int(input_shape[2]), int(input_shape[3])
+        if len(input_shape) == 4:
+            return int(input_shape[2]), int(input_shape[3])
+        if len(input_shape) == 3:
+            # Conv1d input [B, C, L] -> H=1, W=L wrap
+            return 1, int(input_shape[2])
+        raise ValueError(
+            f"StaticQuantConv2dNode '{self.name}': expected 3D or 4D input shape "
+            f"from '{input_node.name}', got {input_shape!r}."
+        )
+
+    def _unpack_conv_dims_h1_wrap(self) -> tuple:
+        """Return (k_h, k_w, s_h, s_w, p_h, p_w, in_h, in_w) handling Conv1d via H=1.
+
+        Conv1d metadata stores kernel_size/stride/padding as scalars; Conv2d as tuples.
+        """
+        kernel_size = self.metadata['kernel_size']
+        stride = self.metadata['stride']
+        padding = self.metadata['padding']
+        is_1d = not isinstance(kernel_size, (tuple, list))
+        if is_1d:
+            k_h, k_w = 1, int(kernel_size)
+            s_h, s_w = 1, int(stride)
+            p_h, p_w = 0, int(padding)
+        else:
+            k_h, k_w = int(kernel_size[0]), int(kernel_size[1])
+            s_h, s_w = int(stride[0]), int(stride[1])
+            p_h, p_w = int(padding[0]), int(padding[1])
+        in_h, in_w = self._get_input_spatial_dims()
+        return k_h, k_w, s_h, s_w, p_h, p_w, in_h, in_w
     
     def __repr__(self) -> str:
         return (f"StaticQuantConv2dNode(name='{self.name}', "
@@ -259,17 +269,11 @@ class StaticPerChannelQuantConv2dNode(StaticQuantConv2dNode):
         weight_name = c_printer._sanitize_name(self.metadata['weight_name'])
         bias_name = c_printer._sanitize_name(self.metadata['bias_name']) \
                     if self.metadata.get('bias_name') else 'NULL'
-        kernel_size = self.metadata['kernel_size']
-        stride = self.metadata['stride']
-        padding = self.metadata['padding']
         in_channels = self.metadata['in_channels']
         out_channels = self.metadata['out_channels']
         groups = self.metadata.get('groups', 1)
 
-        k_h, k_w = kernel_size if isinstance(kernel_size, (tuple, list)) else (kernel_size, kernel_size)
-        s_h, s_w = stride if isinstance(stride, (tuple, list)) else (stride, stride)
-        p_h, p_w = padding if isinstance(padding, (tuple, list)) else (padding, padding)
-        in_h, in_w = self._get_input_spatial_dims()
+        k_h, k_w, s_h, s_w, p_h, p_w, in_h, in_w = self._unpack_conv_dims_h1_wrap()
 
         is_depthwise = (
             groups > 1
@@ -406,20 +410,13 @@ class DynamicQuantConv2dNode(QuantIRNode):
         bias_name = c_printer._sanitize_name(self.metadata['bias_name']) \
                     if self.metadata.get('bias_name') else 'NULL'
         
-        kernel_size = self.metadata['kernel_size']
-        stride = self.metadata['stride']
-        padding = self.metadata['padding']
         in_channels = self.metadata['in_channels']
         out_channels = self.metadata['out_channels']
         groups = self.metadata.get('groups', 1)
-        
-        k_h, k_w = kernel_size if isinstance(kernel_size, (tuple, list)) else (kernel_size, kernel_size)
-        s_h, s_w = stride if isinstance(stride, (tuple, list)) else (stride, stride)
-        p_h, p_w = padding if isinstance(padding, (tuple, list)) else (padding, padding)
-        
+
         input_scale_var = self._get_input_scale_variable(c_printer)
-        
-        in_h, in_w = self._get_input_spatial_dims()
+
+        k_h, k_w, s_h, s_w, p_h, p_w, in_h, in_w = self._unpack_conv_dims_h1_wrap()
         
         is_depthwise = (groups > 1
                         and groups == in_channels
@@ -471,15 +468,34 @@ class DynamicQuantConv2dNode(QuantIRNode):
         return lines
     
     def _get_input_spatial_dims(self) -> tuple:
-        """Get input (H, W) from the input node's shape."""
+        """(H, W) for Conv2d, or (1, L) for Conv1d via H=1 wrap."""
         if self.inputs and self.inputs[0].output_shape:
             input_shape = self.inputs[0].output_shape
             if len(input_shape) == 4:
-                return input_shape[2], input_shape[3]
+                return int(input_shape[2]), int(input_shape[3])
+            if len(input_shape) == 3:
+                return 1, int(input_shape[2])
         raise ValueError(
             f"DynamicQuantConv2dNode '{self.name}': cannot determine input "
             f"spatial dimensions. Ensure input shape is available."
         )
+
+    def _unpack_conv_dims_h1_wrap(self) -> tuple:
+        """Same as StaticQuantConv2dNode helper; duplicated to avoid base-class import order."""
+        kernel_size = self.metadata['kernel_size']
+        stride = self.metadata['stride']
+        padding = self.metadata['padding']
+        is_1d = not isinstance(kernel_size, (tuple, list))
+        if is_1d:
+            k_h, k_w = 1, int(kernel_size)
+            s_h, s_w = 1, int(stride)
+            p_h, p_w = 0, int(padding)
+        else:
+            k_h, k_w = int(kernel_size[0]), int(kernel_size[1])
+            s_h, s_w = int(stride[0]), int(stride[1])
+            p_h, p_w = int(padding[0]), int(padding[1])
+        in_h, in_w = self._get_input_spatial_dims()
+        return k_h, k_w, s_h, s_w, p_h, p_w, in_h, in_w
     
     def _get_input_scale_variable(self, c_printer) -> str:
         """

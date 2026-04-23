@@ -188,9 +188,19 @@ def _compute_flat_input_size(example_input: torch.Tensor) -> int:
 
 
 def _nchw_to_nhwc_flat(tensor: torch.Tensor) -> np.ndarray:
-    """Convert a single (1, C, H, W) tensor to NHWC flat numpy."""
+    """Convert a PyTorch tensor to the C-side channels-last layout, flat.
+
+    Used for both inputs (before sending to C) and outputs (PyTorch reference,
+    so it lines up with the C output's flat layout).
+
+    4D NCHW [B, C, H, W] -> NHWC [B, H, W, C].
+    3D NCL  [B, C, L]    -> NLC  [B, L, C].
+    Other ranks pass through unchanged.
+    """
     if tensor.dim() == 4:
         tensor = tensor.permute(0, 2, 3, 1)
+    elif tensor.dim() == 3:
+        tensor = tensor.permute(0, 2, 1)
     return tensor.detach().numpy().flatten().astype(np.float32)
 
 
@@ -277,7 +287,7 @@ def verify_model(
             with torch.no_grad():
                 out = model(inp)
             all_inputs_flat.append(_nchw_to_nhwc_flat(inp))
-            pytorch_outputs.append(out.numpy().flatten().astype(np.float32))
+            pytorch_outputs.append(_nchw_to_nhwc_flat(out))
 
         # 7. Write all inputs as a single binary blob
         input_bin = os.path.join(tmpdir, "inputs.bin")

@@ -144,7 +144,7 @@ class StaticQuantRule(QuantRule):
                 weight_offset=self.weight_offset,
                 output_offset=self.output_offset
             )
-        elif node.op_type == 'conv2d':
+        elif node.op_type in ('conv2d', 'conv1d'):
             from .ops.quant_conv2d import StaticQuantConv2dNode
             return StaticQuantConv2dNode(
                 original_node=node,
@@ -359,9 +359,9 @@ class StaticPerChannelConvQuantRule(QuantRule):
         self.weight_offset = weight_offset
 
     def create_quant_node(self, node):
-        if node.op_type != 'conv2d':
+        if node.op_type not in ('conv2d', 'conv1d'):
             raise ValueError(
-                f"StaticPerChannelConvQuantRule only supports conv2d, got '{node.op_type}'."
+                f"StaticPerChannelConvQuantRule only supports conv2d/conv1d, got '{node.op_type}'."
             )
         from .ops.quant_conv2d import StaticPerChannelQuantConv2dNode
 
@@ -477,7 +477,7 @@ class DynamicQuantRuleMinMaxPerTensor(QuantRule):
                 weight_scale=self._computed_scale,
                 offset=self._computed_offset
             )
-        elif node.op_type == 'conv2d':
+        elif node.op_type in ('conv2d', 'conv1d'):
             from .ops.quant_conv2d import DynamicQuantConv2dNode
             return DynamicQuantConv2dNode(
                 original_node=node,
