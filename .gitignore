@@ -31,6 +31,7 @@ htmlcov/
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -47,7 +48,11 @@ examples/*/generated*/
 examples/*/*.pth
 examples/mnist_cnn_weights.pth
 data/
+.mnist_cache/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Personal research notes (not for public repo)
+RESEARCH_NOTES.md
