@@ -67,3 +67,63 @@ class TestVerifyQuantized:
             tolerance=5.0,
         )
         assert res.top1_matches > 0 or res.num_samples == res.passed, res.summary()
+
+
+class _Conv1dStandardOnly(torch.nn.Module):
+    """Single Conv1d (standard, k=3) for end-to-end verify harness coverage."""
+
+    def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv1d(4, 6, kernel_size=3, padding=1, bias=True)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class _Conv1dDepthwiseOnly(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv1d(8, 8, kernel_size=3, padding=1, groups=8, bias=False)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class TestVerifyConv1d:
+    """Conv1d path through trace → codegen → gcc (no external model files)."""
+
+    def test_conv1d_standard_float(self):
+        _skip_no_gcc()
+        model = _Conv1dStandardOnly().eval()
+        res = verify_model(model, torch.randn(1, 4, 8), num_samples=10, tolerance=1e-3)
+        assert res.failed == 0, res.summary()
+
+    def test_conv1d_standard_dynamic_int8(self):
+        _skip_no_gcc()
+        from src.pytorch_to_c.quantization import DynamicQuantRuleMinMaxPerTensor
+
+        rules = [DynamicQuantRuleMinMaxPerTensor(pattern=r'.*conv.*', dtype='int8')]
+        model = _Conv1dStandardOnly().eval()
+        res = verify_model(
+            model,
+            torch.randn(1, 4, 8),
+            num_samples=10,
+            tolerance=0.5,
+            quantization_rules=rules,
+        )
+        assert res.failed == 0, res.summary()
+
+    def test_conv1d_depthwise_dynamic_int8(self):
+        _skip_no_gcc()
+        from src.pytorch_to_c.quantization import DynamicQuantRuleMinMaxPerTensor
+
+        rules = [DynamicQuantRuleMinMaxPerTensor(pattern=r'.*conv.*', dtype='int8')]
+        model = _Conv1dDepthwiseOnly().eval()
+        res = verify_model(
+            model,
+            torch.randn(1, 8, 16),
+            num_samples=10,
+            tolerance=0.5,
+            quantization_rules=rules,
+        )
+        assert res.failed == 0, res.summary()
