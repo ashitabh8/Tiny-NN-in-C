@@ -206,6 +206,54 @@ static inline void dense_int8_per_channel(
     }
 }
 
+/**
+ * Dense int8 — per-group weight scales along input axis.
+ *
+ * weight_scales layout: [num_groups * out_features], index g*out_features + o.
+ */
+static inline void dense_int8_per_group(
+    const int8_t* x,
+    int in_features,
+    const int8_t* W,
+    const float* b,
+    int out_features,
+    int group_size,
+    float input_scale,
+    const float* weight_scales,
+    float output_scale,
+    int input_zp,
+    int weight_zp,
+    int output_zp,
+    int8_t* y)
+{
+    int num_groups = in_features / group_size;
+    for (int o = 0; o < out_features; ++o) {
+        float result = 0.0f;
+        for (int g = 0; g < num_groups; ++g) {
+            int64_t acc = 0;
+            int64_t sum_qx = 0;
+            int64_t sum_qw = 0;
+            int base = g * group_size;
+            for (int i = 0; i < group_size; ++i) {
+                int idx = base + i;
+                int64_t wv = (int64_t)W[idx * out_features + o];
+                acc += (int64_t)x[idx] * wv;
+                sum_qx += (int64_t)x[idx];
+                sum_qw += wv;
+            }
+            int64_t zp_term = (int64_t)input_zp * (int64_t)weight_zp * (int64_t)group_size;
+            int64_t dot_affine = acc - (int64_t)weight_zp * sum_qx
+                                 - (int64_t)input_zp * sum_qw + zp_term;
+            result += (float)dot_affine * input_scale
+                      * weight_scales[g * out_features + o];
+        }
+        if (b != NULL) {
+            result += b[o];
+        }
+        y[o] = quantize_scalar_int8(result, output_scale, output_zp);
+    }
+}
+
 /* ============================================================================
  * Quantized Activation Functions
  * ============================================================================ */
@@ -785,6 +833,28 @@ static inline void flatten_int8(const int8_t* src, int n, int8_t* dst)
 {
     for (int i = 0; i < n; ++i) {
         dst[i] = src[i];
+    }
+}
+
+/**
+ * Dense: float activations, int8 weights, per-output-feature symmetric scales
+ * -> float output.
+ */
+static inline void dense_float_input_int8_weight_per_channel(
+    const float* x, int in_features,
+    const int8_t* W, const float* b,
+    int out_features,
+    const float* weight_scales,
+    float* y)
+{
+    for (int o = 0; o < out_features; ++o) {
+        float acc = (b != NULL) ? b[o] : 0.0f;
+        float scale_o = weight_scales[o];
+        const int8_t* w_col = W + o;
+        for (int i = 0; i < in_features; ++i) {
+            acc += x[i] * ((float)w_col[i * out_features] * scale_o);
+        }
+        y[o] = acc;
     }
 }
 
