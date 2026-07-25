@@ -108,6 +108,32 @@ class QuantIRNode(IRNode):
         """
         return []
     
+    def get_parallel_branch(self, ir_graph) -> Optional[Tuple[List['IRNode'], 'IRNode']]:
+        """
+        Declare a parallel side-branch (diamond) around this node.
+        
+        The branch is a chain of nodes fed from this node's ORIGINAL float
+        input (i.e. it attaches before any pre-nodes such as quantize nodes),
+        and the join node merges this node's float output with the branch
+        output, taking over this node's users:
+        
+            x --+--> [pre nodes] --> self --> [post nodes] --+
+                |                                            v
+                +--> branch[0] --> ... --> branch[-1] --> join --> users
+        
+        The transform wires the diamond generically via
+        QuantizationTransform._insert_parallel_branch(); the node only
+        declares WHAT the branch computes (e.g. LQER low-rank error
+        correction). Nodes may register extra parameters on ir_graph.
+        
+        Args:
+            ir_graph: The IRGraph, for registering branch parameters
+        
+        Returns:
+            (branch_nodes, join_node) or None (default: no branch)
+        """
+        return None
+    
     def get_c_dtype(self) -> str:
         """Return C data type string for this quantized dtype."""
         if self.dtype == 'int8':

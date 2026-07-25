@@ -84,6 +84,23 @@ class QuantizeNode(IRNode):
             ]
         else:
             raise ValueError(f"Unsupported target dtype: {self.target_dtype}")
+
+    def generate_triton_code(self, printer) -> List[str]:
+        """Generate Triton/Python code for quantization."""
+        input_buf = printer._get_input_buffer(self, 0)
+        output_buf = printer._get_buffer_name(self)
+        size = printer._calculate_buffer_sizes()[self.name]
+        if self.target_dtype == "int8":
+            return [
+                f"ops_q.quantize_float_to_int8({input_buf}, {size}, "
+                f"{self.scale}, {self.offset}, {output_buf})"
+            ]
+        if self.target_dtype == "int16":
+            return [
+                f"ops_q.quantize_float_to_int16({input_buf}, {size}, "
+                f"{self.scale}, {self.offset}, {output_buf})"
+            ]
+        raise ValueError(f"Unsupported target dtype: {self.target_dtype}")
     
     def validate_input_dtypes(self) -> bool:
         """
@@ -190,6 +207,26 @@ class DynamicQuantizeInputNode(IRNode):
         else:
             raise ValueError(f"Unsupported target dtype: {self.target_dtype}")
         
+        return lines
+
+    def generate_triton_code(self, printer) -> List[str]:
+        lines = []
+        input_buf = printer._get_input_buffer(self, 0)
+        output_buf = printer._get_buffer_name(self)
+        size = self._get_input_size(printer)
+        scale_var = f"scale_{printer._w(self.name)}"
+        if self.target_dtype == "int8":
+            lines.extend([
+                f"{scale_var} = ops_q.compute_dynamic_scale_int8({input_buf}, {size})",
+                f"ops_q.quantize_float_to_int8({input_buf}, {size}, {scale_var}, 0, {output_buf})",
+            ])
+        elif self.target_dtype == "int16":
+            lines.extend([
+                f"{scale_var} = ops_q.compute_dynamic_scale_int16({input_buf}, {size})",
+                f"ops_q.quantize_float_to_int16({input_buf}, {size}, {scale_var}, 0, {output_buf})",
+            ])
+        else:
+            raise ValueError(f"Unsupported target dtype: {self.target_dtype}")
         return lines
     
     def _get_input_size(self, c_printer) -> int:
@@ -308,6 +345,22 @@ class DequantizeNode(IRNode):
             ]
         else:
             raise ValueError(f"Unsupported source dtype: {self.source_dtype}")
+
+    def generate_triton_code(self, printer) -> List[str]:
+        input_buf = printer._get_input_buffer(self, 0)
+        output_buf = printer._get_buffer_name(self)
+        size = printer._calculate_buffer_sizes()[self.name]
+        if self.source_dtype == "int8":
+            return [
+                f"ops_q.dequantize_int8_to_float({input_buf}, {size}, "
+                f"{self.scale}, {self.offset}, {output_buf})"
+            ]
+        if self.source_dtype == "int16":
+            return [
+                f"ops_q.dequantize_int16_to_float({input_buf}, {size}, "
+                f"{self.scale}, {self.offset}, {output_buf})"
+            ]
+        raise ValueError(f"Unsupported source dtype: {self.source_dtype}")
     
     def validate_input_dtypes(self) -> bool:
         """

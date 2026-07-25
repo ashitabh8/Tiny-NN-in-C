@@ -154,13 +154,15 @@ def _gcc_available() -> bool:
         return False
 
 
-def _compile_c(tmpdir: str, harness_path: str) -> str:
+def _compile_c(tmpdir: str, harness_path: str, openmp: bool = False) -> str:
     exe = os.path.join(tmpdir, "verify_model")
     model_c = os.path.join(tmpdir, "model.c")
     cmd = [
         "gcc", "-o", exe, harness_path, model_c,
         f"-I{tmpdir}", "-lm", "-std=c99", "-O2",
     ]
+    if openmp:
+        cmd.append("-fopenmp")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise RuntimeError(f"gcc failed:\n{result.stderr}")
@@ -216,6 +218,7 @@ def verify_model(
     passes=None,
     tolerance: float = 1e-3,
     verbose: bool = False,
+    openmp: bool = False,
 ) -> VerificationResults:
     """Verify a PyTorch model against its compiled C equivalent.
 
@@ -230,11 +233,15 @@ def verify_model(
     quantization_rules : list[QuantRule] | None
         If supplied, quantization is applied to the IR before codegen.
     passes : list[IRPass] | None
-        Optional IR passes to apply after quantization.
+        Optional IR passes to apply before quantization (e.g. pruning).
     tolerance : float
         Maximum absolute error per element for a sample to be considered passing.
     verbose : bool
         Print per-sample details.
+    openmp : bool
+        Build with -fopenmp so parallel regions (e.g. LQER diamonds) execute
+        concurrently. Without it, the OpenMP pragmas are ignored and the same
+        code runs sequentially.
 
     Returns
     -------
@@ -262,21 +269,21 @@ def verify_model(
         # 1. Compile model to IR
         ir_graph = compile_model(model, example_input, return_ir=True, verbose=False)
 
-        # 2. Apply quantization if requested
+        # 2. Apply structural passes first (pruning, etc.)
+        for p in passes:
+            ir_graph = p.apply(ir_graph)
+
+        # 3. Apply quantization if requested
         if is_quantized:
             from src.pytorch_to_c.quantization import QuantizationTransform
             ir_graph = QuantizationTransform(quantization_rules).apply(ir_graph)
-
-        # 3. Apply additional passes
-        for p in passes:
-            ir_graph = p.apply(ir_graph)
 
         # 4. Generate C code
         CPrinter(ir_graph).generate_all(tmpdir)
 
         # 5. Write C harness and compile
         harness_path = _write_harness(tmpdir, input_flat_size, output_flat_size)
-        exe = _compile_c(tmpdir, harness_path)
+        exe = _compile_c(tmpdir, harness_path, openmp=openmp)
 
         # 6. Generate random inputs and collect PyTorch outputs
         torch.manual_seed(42)

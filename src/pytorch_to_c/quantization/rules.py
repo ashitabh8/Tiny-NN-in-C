@@ -417,6 +417,485 @@ class StaticPerChannelConvQuantRule(QuantRule):
         )
 
 
+class StaticPerGroupLinearQuantRule(QuantRule):
+    """
+    Per-group weight quantization along the input axis with tile-aligned group sizes.
+    """
+
+    def __init__(
+        self,
+        pattern: str,
+        dtype: str,
+        input_scale: float,
+        input_offset: int,
+        output_scale: float,
+        output_offset: int,
+        weight_offset: int = 0,
+        group_size: int | str = "auto",
+        error_budget: Optional[float] = None,
+        rounding: str = "nearest",
+        calibration=None,
+    ):
+        super().__init__(pattern, dtype)
+        self.input_scale = input_scale
+        self.input_offset = input_offset
+        self.output_scale = output_scale
+        self.output_offset = output_offset
+        self.weight_offset = weight_offset
+        self.group_size = group_size
+        self.error_budget = error_budget
+        self.rounding = rounding
+        self.calibration = calibration
+
+    def create_quant_node(self, node):
+        if node.op_type != "linear":
+            raise ValueError(
+                f"StaticPerGroupLinearQuantRule only supports linear, got '{node.op_type}'."
+            )
+        from .ops.quant_linear import StaticPerGroupQuantLinearNode
+
+        return StaticPerGroupQuantLinearNode(
+            original_node=node,
+            dtype=self.dtype,
+            input_scale=self.input_scale,
+            output_scale=self.output_scale,
+            input_offset=self.input_offset,
+            weight_offset=self.weight_offset,
+            output_offset=self.output_offset,
+        )
+
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
+        from .quant_helpers import (
+            quantize_affine_per_group,
+            select_group_size,
+            symmetric_scales_per_group,
+        )
+        from .gptq import gptq_quantize
+
+        ir_graph = kwargs.get("ir_graph")
+        quant_node = kwargs.get("quant_node")
+        if ir_graph is None or quant_node is None:
+            raise ValueError("StaticPerGroupLinearQuantRule requires ir_graph and quant_node")
+
+        wn = quant_node.metadata.get("weight_name")
+        g = select_group_size(
+            weights, self.dtype, self.group_size, self.error_budget
+        )
+        quant_node.metadata["group_size"] = g
+
+        if self.rounding == "gptq":
+            hessian = None
+            if self.calibration is not None:
+                hessian = self.calibration.hessians.get(quant_node.name)
+            wq = gptq_quantize(
+                weights, hessian, g, self.dtype, self.weight_offset
+            )
+            scales = symmetric_scales_per_group(
+                weights, g, self.dtype, self.weight_offset
+            )
+        else:
+            scales = symmetric_scales_per_group(
+                weights, g, self.dtype, self.weight_offset
+            )
+            wq = quantize_affine_per_group(
+                weights, scales, g, self.weight_offset, self.dtype
+            )
+
+        param_name = f"{wn}_per_group_scales"
+        ir_graph.parameters[param_name] = scales.astype(np.float32).reshape(-1)
+        quant_node.metadata["per_group_weight_scales_param"] = param_name
+        quant_node.metadata["num_groups"] = weights.shape[0] // g
+        quant_node.scale = float(np.mean(scales))
+        return wq
+
+    def get_quant_params(self) -> Dict[str, Any]:
+        return {
+            "dtype": self.dtype,
+            "strategy": "static_per_group_linear",
+            "group_size": self.group_size,
+            "rounding": self.rounding,
+        }
+
+
+class Int8WeightOnlyLinearRule(QuantRule):
+    """Int8 weight-only linear with per-output-column symmetric scales (float activations)."""
+
+    def __init__(self, pattern: str, weight_offset: int = 0):
+        super().__init__(pattern, "int8")
+        self.weight_offset = weight_offset
+
+    def create_quant_node(self, node):
+        if node.op_type != "linear":
+            raise ValueError(
+                f"Int8WeightOnlyLinearRule only supports linear, got '{node.op_type}'."
+            )
+        from .ops.quant_linear import Int8WeightOnlyLinearNode
+
+        return Int8WeightOnlyLinearNode(original_node=node)
+
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
+        ir_graph = kwargs.get("ir_graph")
+        quant_node = kwargs.get("quant_node")
+        if ir_graph is None or quant_node is None:
+            raise ValueError(
+                "Int8WeightOnlyLinearRule.quantize_weights requires "
+                "ir_graph= and quant_node="
+            )
+        wn = quant_node.metadata.get("weight_name")
+        if not wn:
+            raise ValueError("Quant node missing metadata['weight_name']")
+
+        q_max = _q_max_for_dtype(self.dtype)
+        scales = _symmetric_scales_last_axis(weights, q_max).astype(np.float32)
+        param_name = f"{wn}_per_channel_scales"
+        ir_graph.parameters[param_name] = scales
+        quant_node.metadata["per_channel_weight_scales_param"] = param_name
+        quant_node.scale = float(np.mean(scales))
+        quant_node.metadata["quant_params"]["scale"] = quant_node.scale
+
+        return _quantize_affine_per_last_axis(
+            weights, scales.astype(np.float64), self.weight_offset, self.dtype
+        )
+
+    def get_quant_params(self) -> Dict[str, Any]:
+        return {"dtype": self.dtype, "strategy": "int8_weight_only"}
+
+
+def _pack_int4_per_group_weights(
+    weights: np.ndarray,
+    *,
+    group_size: int,
+    weight_offset: int,
+    rounding: str,
+    calibration,
+    ir_graph,
+    quant_node,
+) -> np.ndarray:
+    """Shared int4 per-group weight packing for static/dynamic int4 rules."""
+    from .quant_helpers import (
+        pack_int4_nibbles,
+        quantize_affine_per_group,
+        symmetric_scales_per_group,
+    )
+    from .gptq import gptq_quantize
+
+    wn = quant_node.metadata.get("weight_name")
+    if not wn:
+        raise ValueError("Quant node missing metadata['weight_name']")
+
+    g = group_size
+    in_features = weights.shape[0]
+    if in_features % g != 0:
+        g = in_features
+    quant_node.metadata["group_size"] = g
+
+    if rounding == "gptq":
+        hessian = None
+        if calibration is not None:
+            hessian = calibration.hessians.get(quant_node.name)
+        wq = gptq_quantize(weights, hessian, g, "int8", weight_offset)
+        wq = np.clip(wq, -8, 7).astype(np.int8)
+        scales = symmetric_scales_per_group(weights, g, "int4", weight_offset)
+    else:
+        scales = symmetric_scales_per_group(weights, g, "int4", weight_offset)
+        wq = quantize_affine_per_group(weights, scales, g, weight_offset, "int8")
+        wq = np.clip(wq, -8, 7).astype(np.int8)
+
+    packed = pack_int4_nibbles(wq)
+    param_name = f"{wn}_per_group_scales"
+    ir_graph.parameters[param_name] = scales.astype(np.float32).reshape(-1)
+    quant_node.metadata["per_group_weight_scales_param"] = param_name
+    quant_node.metadata["packed_int4"] = True
+    quant_node.metadata["original_weight_shape"] = list(weights.shape)
+    quant_node.metadata["packed_weight_count"] = int(wq.size)
+    quant_node.scale = float(np.mean(scales))
+    if "quant_params" in quant_node.metadata:
+        quant_node.metadata["quant_params"]["scale"] = quant_node.scale
+    return packed
+
+
+class StaticInt4PerGroupLinearQuantRule(QuantRule):
+    """
+    Static W4A8 linear: int8 activations + packed int4 weights (per-group scales).
+
+    Inserts QuantizeNode / DequantizeNode like other static rules.
+    """
+
+    def __init__(
+        self,
+        pattern: str,
+        input_scale: float,
+        input_offset: int,
+        output_scale: float,
+        output_offset: int,
+        group_size: int = 64,
+        weight_offset: int = 0,
+        rounding: str = "nearest",
+        calibration=None,
+    ):
+        super().__init__(pattern, "int8")
+        self.input_scale = input_scale
+        self.input_offset = input_offset
+        self.output_scale = output_scale
+        self.output_offset = output_offset
+        self.group_size = group_size
+        self.weight_offset = weight_offset
+        self.rounding = rounding
+        self.calibration = calibration
+
+    def create_quant_node(self, node):
+        if node.op_type != "linear":
+            raise ValueError(
+                f"StaticInt4PerGroupLinearQuantRule only supports linear, got '{node.op_type}'"
+            )
+        from .ops.quant_int4_linear import StaticInt4PerGroupQuantLinearNode
+
+        return StaticInt4PerGroupQuantLinearNode(
+            original_node=node,
+            input_scale=self.input_scale,
+            output_scale=self.output_scale,
+            input_offset=self.input_offset,
+            weight_offset=self.weight_offset,
+            output_offset=self.output_offset,
+            group_size=self.group_size,
+        )
+
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
+        ir_graph = kwargs.get("ir_graph")
+        quant_node = kwargs.get("quant_node")
+        if ir_graph is None or quant_node is None:
+            raise ValueError(
+                "StaticInt4PerGroupLinearQuantRule requires ir_graph and quant_node"
+            )
+        return _pack_int4_per_group_weights(
+            weights,
+            group_size=self.group_size,
+            weight_offset=self.weight_offset,
+            rounding=self.rounding,
+            calibration=self.calibration,
+            ir_graph=ir_graph,
+            quant_node=quant_node,
+        )
+
+    def get_quant_params(self) -> Dict[str, Any]:
+        return {
+            "dtype": "int8",
+            "strategy": "static_int4_per_group",
+            "group_size": self.group_size,
+            "rounding": self.rounding,
+            "input_scale": self.input_scale,
+            "output_scale": self.output_scale,
+        }
+
+
+class DynamicInt4PerGroupLinearQuantRule(QuantRule):
+    """
+    Dynamic W4A8 linear: runtime activation scale + packed int4 weights.
+
+    Inserts DynamicQuantizeInputNode; float-output kernel (no DequantizeNode).
+    """
+
+    def __init__(
+        self,
+        pattern: str,
+        group_size: int = 64,
+        weight_offset: int = 0,
+        rounding: str = "nearest",
+        calibration=None,
+    ):
+        super().__init__(pattern, "int8")
+        self.group_size = group_size
+        self.weight_offset = weight_offset
+        self.rounding = rounding
+        self.calibration = calibration
+
+    def create_quant_node(self, node):
+        raise NotImplementedError(
+            "DynamicInt4PerGroupLinearQuantRule.create_quant_node requires "
+            "weights. Use QuantizationTransform (create_quant_node_with_weights)."
+        )
+
+    def create_quant_node_with_weights(self, node, weights: np.ndarray):
+        if node.op_type != "linear":
+            raise ValueError(
+                f"DynamicInt4PerGroupLinearQuantRule only supports linear, got '{node.op_type}'"
+            )
+        from .ops.quant_int4_linear import DynamicInt4PerGroupQuantLinearNode
+
+        return DynamicInt4PerGroupQuantLinearNode(
+            original_node=node,
+            group_size=self.group_size,
+            weight_offset=self.weight_offset,
+        )
+
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
+        ir_graph = kwargs.get("ir_graph")
+        quant_node = kwargs.get("quant_node")
+        if ir_graph is None or quant_node is None:
+            raise ValueError(
+                "DynamicInt4PerGroupLinearQuantRule requires ir_graph and quant_node"
+            )
+        return _pack_int4_per_group_weights(
+            weights,
+            group_size=self.group_size,
+            weight_offset=self.weight_offset,
+            rounding=self.rounding,
+            calibration=self.calibration,
+            ir_graph=ir_graph,
+            quant_node=quant_node,
+        )
+
+    def get_quant_params(self) -> Dict[str, Any]:
+        return {
+            "dtype": "int8",
+            "strategy": "dynamic_int4_per_group",
+            "group_size": self.group_size,
+            "rounding": self.rounding,
+        }
+
+
+class PaletteWeightRule(QuantRule):
+    """Weight palettization via k-means codebook (weight-only, float activations)."""
+
+    def __init__(self, pattern: str, num_centroids: int = 16):
+        super().__init__(pattern, "palette")
+        self.num_centroids = num_centroids
+
+    def create_quant_node(self, node):
+        if node.op_type != "linear":
+            raise ValueError("PaletteWeightRule only supports linear")
+        from .ops.quant_linear import PaletteWeightLinearNode
+
+        return PaletteWeightLinearNode(
+            original_node=node, num_centroids=self.num_centroids
+        )
+
+    def quantize_weights(self, weights: np.ndarray, **kwargs) -> np.ndarray:
+        from .quant_helpers import kmeans_1d, pack_palette_indices
+
+        ir_graph = kwargs.get("ir_graph")
+        quant_node = kwargs.get("quant_node")
+        if ir_graph is None or quant_node is None:
+            raise ValueError("PaletteWeightRule requires ir_graph and quant_node")
+
+        wn = quant_node.metadata.get("weight_name")
+        codebook, indices = kmeans_1d(weights, self.num_centroids)
+        packed = pack_palette_indices(indices, self.num_centroids)
+
+        cb_name = f"{wn}_codebook"
+        idx_name = f"{wn}_indices"
+        ir_graph.parameters[cb_name] = codebook
+        ir_graph.parameters[idx_name] = packed
+        quant_node.metadata["codebook_param"] = cb_name
+        quant_node.metadata["indices_param"] = idx_name
+        quant_node.metadata["num_centroids"] = self.num_centroids
+        quant_node.metadata["original_weight_shape"] = list(weights.shape)
+        quant_node.metadata["weight_count"] = int(weights.size)
+        return packed
+
+    def get_quant_params(self) -> Dict[str, Any]:
+        return {
+            "dtype": "palette",
+            "strategy": "palettization",
+            "num_centroids": self.num_centroids,
+        }
+
+
+def _lqer_error_for_node(rule_name: str, error_matrix, node) -> np.ndarray:
+    """Resolve the error matrix for a node: single array or {name: array} dict."""
+    if isinstance(error_matrix, dict):
+        if node.name not in error_matrix:
+            raise ValueError(
+                f"{rule_name}: no error matrix provided for matched node "
+                f"'{node.name}'. Available: {sorted(error_matrix.keys())}"
+            )
+        return error_matrix[node.name]
+    return error_matrix
+
+
+class LQERStaticQuantRule(StaticQuantRule):
+    """
+    StaticQuantRule + LQER low-rank error correction (see ops/quant_LQER.py).
+
+    The user supplies the full weight-quantization error matrix E and a rank;
+    the node factorizes E at compile time (default SVD, pluggable) and the
+    correction branch runs in parallel with the quantized path, joined by a
+    float add after the dequantize.
+
+    error_matrix: ndarray (pattern matches one layer) or {node_name: ndarray}.
+    Linear layout: [in_features, out_features]. Conv2d layout: HWIO
+    [kh, kw, in_c, out_c] or flattened [kh*kw*in_c, out_c].
+    """
+
+    def __init__(
+        self,
+        pattern: str,
+        dtype: str,
+        input_scale: float,
+        input_offset: int,
+        weight_scale: float,
+        weight_offset: int,
+        output_scale: float,
+        output_offset: int,
+        error_matrix=None,
+        rank: int = 8,
+        factorizer=None,
+    ):
+        super().__init__(
+            pattern, dtype,
+            input_scale, input_offset,
+            weight_scale, weight_offset,
+            output_scale, output_offset,
+        )
+        if error_matrix is None:
+            raise ValueError("LQERStaticQuantRule requires error_matrix")
+        self.error_matrix = error_matrix
+        self.rank = rank
+        self.factorizer = factorizer
+
+    def create_quant_node(self, node):
+        error = _lqer_error_for_node("LQERStaticQuantRule", self.error_matrix, node)
+        if node.op_type == 'linear':
+            from .ops.quant_LQER import LQERStaticQuantLinearNode
+            return LQERStaticQuantLinearNode(
+                original_node=node,
+                dtype=self.dtype,
+                input_scale=self.input_scale,
+                weight_scale=self.weight_scale,
+                output_scale=self.output_scale,
+                error_matrix=error,
+                rank=self.rank,
+                input_offset=self.input_offset,
+                weight_offset=self.weight_offset,
+                output_offset=self.output_offset,
+                factorizer=self.factorizer,
+            )
+        elif node.op_type == 'conv2d':
+            from .ops.quant_LQER import LQERStaticQuantConv2dNode
+            return LQERStaticQuantConv2dNode(
+                original_node=node,
+                dtype=self.dtype,
+                input_scale=self.input_scale,
+                weight_scale=self.weight_scale,
+                output_scale=self.output_scale,
+                error_matrix=error,
+                rank=self.rank,
+                input_offset=self.input_offset,
+                weight_offset=self.weight_offset,
+                output_offset=self.output_offset,
+                factorizer=self.factorizer,
+            )
+        else:
+            raise ValueError(
+                f"LQERStaticQuantRule supports linear and conv2d, got "
+                f"'{node.op_type}' for node '{node.name}'"
+            )
+
+    def __repr__(self) -> str:
+        return (f"LQERStaticQuantRule(pattern='{self.pattern}', dtype='{self.dtype}', "
+                f"rank={self.rank})")
+
+
 class DynamicQuantRuleMinMaxPerTensor(QuantRule):
     """
     Dynamic quantization using min-max per-tensor.
@@ -556,4 +1035,76 @@ class DynamicQuantRuleMinMaxPerTensor(QuantRule):
     
     def __repr__(self) -> str:
         return f"DynamicQuantRuleMinMaxPerTensor(pattern='{self.pattern}', dtype='{self.dtype}')"
+
+
+class LQERDynamicQuantRule(DynamicQuantRuleMinMaxPerTensor):
+    """
+    DynamicQuantRuleMinMaxPerTensor + LQER low-rank error correction
+    (see ops/quant_LQER.py).
+
+    The quantized path uses the float-output dynamic kernels, so the join is
+    a plain float add of the layer output and the low-rank correction, and
+    both chains run in parallel (OpenMP sections in the C backend).
+
+    error_matrix: ndarray (pattern matches one layer) or {node_name: ndarray}.
+    Linear layout: [in_features, out_features]. Conv2d layout: HWIO
+    [kh, kw, in_c, out_c] or flattened [kh*kw*in_c, out_c].
+    """
+
+    def __init__(
+        self,
+        pattern: str,
+        dtype: str,
+        error_matrix=None,
+        rank: int = 8,
+        factorizer=None,
+    ):
+        super().__init__(pattern, dtype)
+        if error_matrix is None:
+            raise ValueError("LQERDynamicQuantRule requires error_matrix")
+        self.error_matrix = error_matrix
+        self.rank = rank
+        self.factorizer = factorizer
+
+    def create_quant_node_with_weights(self, node, weights: np.ndarray):
+        self._computed_scale, self._computed_offset = self._compute_scale_offset(weights)
+        error = _lqer_error_for_node("LQERDynamicQuantRule", self.error_matrix, node)
+
+        if node.op_type == 'linear':
+            from .ops.quant_LQER import LQERDynamicQuantLinearNode
+            return LQERDynamicQuantLinearNode(
+                original_node=node,
+                dtype=self.dtype,
+                weight_scale=self._computed_scale,
+                error_matrix=error,
+                rank=self.rank,
+                offset=self._computed_offset,
+                factorizer=self.factorizer,
+            )
+        elif node.op_type == 'conv2d':
+            from .ops.quant_LQER import LQERDynamicQuantConv2dNode
+            return LQERDynamicQuantConv2dNode(
+                original_node=node,
+                dtype=self.dtype,
+                weight_scale=self._computed_scale,
+                error_matrix=error,
+                rank=self.rank,
+                offset=self._computed_offset,
+                factorizer=self.factorizer,
+            )
+        else:
+            raise ValueError(
+                f"LQERDynamicQuantRule supports linear and conv2d, got "
+                f"'{node.op_type}' for node '{node.name}'"
+            )
+
+    def get_quant_params(self) -> Dict[str, Any]:
+        params = super().get_quant_params()
+        params['strategy'] = 'lqer_dynamic_minmax_per_tensor'
+        params['lqer_rank'] = self.rank
+        return params
+
+    def __repr__(self) -> str:
+        return (f"LQERDynamicQuantRule(pattern='{self.pattern}', dtype='{self.dtype}', "
+                f"rank={self.rank})")
 

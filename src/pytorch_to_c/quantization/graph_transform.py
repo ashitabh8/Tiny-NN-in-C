@@ -56,6 +56,12 @@ class QuantizationTransform:
         # Step 2: Replace nodes with quantized versions
         self._replace_nodes(ir_graph, nodes_to_quantize)
         
+        # Step 2.5: Insert parallel branches (diamonds) declared by nodes.
+        # MUST run before pre/post insertion: the branch taps the node's
+        # ORIGINAL float input, which pre-node insertion would otherwise
+        # hide behind a quantize node.
+        self._insert_parallel_branches(ir_graph)
+        
         # Step 3: Insert pre/post nodes as specified by each QuantIRNode
         self._insert_node_controlled_conversions(ir_graph)
         
@@ -153,6 +159,84 @@ class QuantizationTransform:
             for i, user in enumerate(inp.users):
                 if user is old_node:
                     inp.users[i] = new_node
+    
+    def _insert_parallel_branches(self, ir_graph: IRGraph):
+        """
+        Wire parallel branches (diamonds) declared by QuantIRNodes via
+        get_parallel_branch(). This is generic plumbing: the transform knows
+        nothing about WHAT the branch computes (LQER, outlier correction,
+        ...), only how to wire the fan-out/fan-in shape:
+        
+            source --+--> node --------------------+
+                     |                              v
+                     +--> b[0] --> ... --> b[-1] --> join --> original users
+        
+        Runs BEFORE pre/post insertion, so the branch attaches to the node's
+        original (float) input and the join sits where post-nodes (e.g.
+        DequantizeNode) will later be spliced in between node and join.
+        """
+        for node in list(ir_graph.nodes):
+            if not isinstance(node, QuantIRNode):
+                continue
+            branch = node.get_parallel_branch(ir_graph)
+            if branch is None:
+                continue
+            branch_nodes, join_node = branch
+            if not branch_nodes or join_node is None:
+                raise ValueError(
+                    f"Node '{node.name}': get_parallel_branch() must return "
+                    f"(non-empty branch_nodes, join_node) or None"
+                )
+            self._insert_parallel_branch(ir_graph, node, branch_nodes, join_node)
+    
+    def _insert_parallel_branch(
+        self,
+        ir_graph: IRGraph,
+        node: IRNode,
+        branch_nodes: List[IRNode],
+        join_node: IRNode,
+    ):
+        """Wire one diamond around `node` (see _insert_parallel_branches)."""
+        if not node.inputs:
+            raise ValueError(
+                f"Node '{node.name}': cannot insert parallel branch, node has "
+                f"no input to branch from"
+            )
+        source = node.inputs[0]
+        original_users = node.users.copy()
+        
+        # Chain the branch from the shared source: source -> b[0] -> ... -> b[-1].
+        # Branch nodes are placed just before `node` in the list (after source)
+        # to keep the nodes list topologically ordered.
+        node_idx = ir_graph.nodes.index(node)
+        prev = source
+        for i, b_node in enumerate(branch_nodes):
+            b_node.inputs = [prev]
+            b_node.users = []
+            prev.users.append(b_node)
+            ir_graph.nodes.insert(node_idx + i, b_node)
+            prev = b_node
+        branch_end = prev
+        
+        # Join: inputs are [node output, branch output]. Post-node insertion
+        # later rewires inputs[0] to the last post node (e.g. dequantize).
+        join_node.inputs = [node, branch_end]
+        join_node.users = []
+        node.users = [join_node]
+        branch_end.users.append(join_node)
+        ir_graph.nodes.insert(ir_graph.nodes.index(node) + 1, join_node)
+        
+        # Original users now consume the join.
+        for user in original_users:
+            for j, inp in enumerate(user.inputs):
+                if inp is node:
+                    user.inputs[j] = join_node
+            join_node.users.append(user)
+        
+        # If the node was a graph output, the join takes its place.
+        for i, out_node in enumerate(ir_graph.outputs):
+            if out_node is node:
+                ir_graph.outputs[i] = join_node
     
     def _insert_node_controlled_conversions(self, ir_graph: IRGraph):
         """

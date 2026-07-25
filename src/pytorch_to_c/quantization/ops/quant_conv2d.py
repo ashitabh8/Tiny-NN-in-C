@@ -171,6 +171,32 @@ class StaticQuantConv2dNode(QuantIRNode):
 
         return lines
 
+    def generate_triton_code(self, printer) -> List[str]:
+        input_buffer = printer._get_input_buffer(self, 0)
+        output_buffer = printer._get_buffer_name(self)
+        weight_name = printer._w(self.metadata["weight_name"])
+        bias_name = printer._w(self.metadata["bias_name"]) if self.metadata.get("bias_name") else "None"
+        in_channels = self.metadata["in_channels"]
+        out_channels = self.metadata["out_channels"]
+        groups = self.metadata.get("groups", 1)
+        k_h, k_w, s_h, s_w, p_h, p_w, in_h, in_w = self._unpack_conv_dims_h1_wrap()
+        is_depthwise = groups > 1 and groups == in_channels and out_channels == in_channels
+        fn_base = "depthwise_conv2d_nhwc" if is_depthwise else "conv2d_nhwc"
+        fn = f"{fn_base}_int8" if self.dtype == "int8" else f"{fn_base}_int16"
+        if is_depthwise:
+            return [
+                f"ops_q.{fn}({input_buffer}, {in_h}, {in_w}, {in_channels}, {weight_name}, "
+                f"{k_h}, {k_w}, {bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+                f"{self.input_scale}, {self.weight_scale}, {self.output_scale}, "
+                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, {output_buffer})"
+            ]
+        return [
+            f"ops_q.{fn}({input_buffer}, {in_h}, {in_w}, {in_channels}, {weight_name}, "
+            f"{k_h}, {k_w}, {out_channels}, {bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+            f"{self.input_scale}, {self.weight_scale}, {self.output_scale}, "
+            f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, {output_buffer})"
+        ]
+    
     def _get_input_spatial_dims(self) -> tuple:
         """NCHW (H, W) for Conv2d, or (1, L) for Conv1d via H=1 wrap."""
         if not self.inputs:
@@ -329,6 +355,38 @@ class StaticPerChannelQuantConv2dNode(StaticQuantConv2dNode):
                 raise ValueError(f"Unsupported dtype: {self.dtype}")
         return lines
 
+    def generate_triton_code(self, printer) -> List[str]:
+        scales_param = self.metadata.get("per_channel_weight_scales_param")
+        if not scales_param:
+            raise ValueError(
+                f"StaticPerChannelQuantConv2dNode '{self.name}': missing per_channel scales"
+            )
+        scales_c = printer._w(scales_param)
+        input_buffer = printer._get_input_buffer(self, 0)
+        output_buffer = printer._get_buffer_name(self)
+        weight_name = printer._w(self.metadata["weight_name"])
+        bias_name = printer._w(self.metadata["bias_name"]) if self.metadata.get("bias_name") else "None"
+        in_channels = self.metadata["in_channels"]
+        out_channels = self.metadata["out_channels"]
+        groups = self.metadata.get("groups", 1)
+        k_h, k_w, s_h, s_w, p_h, p_w, in_h, in_w = self._unpack_conv_dims_h1_wrap()
+        is_depthwise = groups > 1 and groups == in_channels and out_channels == in_channels
+        fn_base = "depthwise_conv2d_nhwc" if is_depthwise else "conv2d_nhwc"
+        fn = f"{fn_base}_int8_per_channel" if self.dtype == "int8" else f"{fn_base}_int16_per_channel"
+        if is_depthwise:
+            return [
+                f"ops_q.{fn}({input_buffer}, {in_h}, {in_w}, {in_channels}, {weight_name}, "
+                f"{k_h}, {k_w}, {bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+                f"{self.input_scale}, {scales_c}, {self.output_scale}, "
+                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, {output_buffer})"
+            ]
+        return [
+            f"ops_q.{fn}({input_buffer}, {in_h}, {in_w}, {in_channels}, {weight_name}, "
+            f"{k_h}, {k_w}, {out_channels}, {bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+            f"{self.input_scale}, {scales_c}, {self.output_scale}, "
+            f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, {output_buffer})"
+        ]
+
     def __repr__(self) -> str:
         return (f"StaticPerChannelQuantConv2dNode(name='{self.name}', "
                 f"in_ch={self.metadata.get('in_channels')}, "
@@ -466,6 +524,31 @@ class DynamicQuantConv2dNode(QuantIRNode):
                 raise ValueError(f"Unsupported computation dtype: {self.computation_dtype}")
         
         return lines
+
+    def generate_triton_code(self, printer) -> List[str]:
+        input_buffer = printer._get_input_buffer(self, 0)
+        output_buffer = printer._get_buffer_name(self)
+        weight_name = printer._w(self.metadata["weight_name"])
+        bias_name = printer._w(self.metadata["bias_name"]) if self.metadata.get("bias_name") else "None"
+        in_channels = self.metadata["in_channels"]
+        out_channels = self.metadata["out_channels"]
+        groups = self.metadata.get("groups", 1)
+        input_scale_var = self._get_input_scale_variable(printer)
+        k_h, k_w, s_h, s_w, p_h, p_w, in_h, in_w = self._unpack_conv_dims_h1_wrap()
+        is_depthwise = groups > 1 and groups == in_channels and out_channels == in_channels
+        fn_base = "depthwise_conv2d_nhwc" if is_depthwise else "conv2d_nhwc"
+        fn = f"{fn_base}_int8_to_float" if self.computation_dtype == "int8" else f"{fn_base}_int16_to_float"
+        if is_depthwise:
+            return [
+                f"ops_q.{fn}({input_buffer}, {in_h}, {in_w}, {in_channels}, {weight_name}, "
+                f"{k_h}, {k_w}, {bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+                f"{input_scale_var}, {self.weight_scale}, {output_buffer})"
+            ]
+        return [
+            f"ops_q.{fn}({input_buffer}, {in_h}, {in_w}, {in_channels}, {weight_name}, "
+            f"{k_h}, {k_w}, {out_channels}, {bias_name}, {s_h}, {s_w}, {p_h}, {p_w}, "
+            f"{input_scale_var}, {self.weight_scale}, {output_buffer})"
+        ]
     
     def _get_input_spatial_dims(self) -> tuple:
         """(H, W) for Conv2d, or (1, L) for Conv1d via H=1 wrap."""

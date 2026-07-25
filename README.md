@@ -7,6 +7,8 @@
 
 A source-to-source compiler that converts PyTorch `nn.Module` models into standalone, dependency-free C code targeting microcontrollers. Supports float32 and W8A8 (int8/int16) quantized inference. Generated C uses zero dynamic allocation and is portable across bare-metal targets.
 
+> **Extended features** — calibration, per-group/int4 quantization, GPTQ, pruning, palettization, LQER error correction, and the Triton GPU backend are documented separately in [README_FEATURES.md](README_FEATURES.md).
+
 ## Contents
 
 - [Getting Started](#getting-started)

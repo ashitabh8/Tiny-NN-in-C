@@ -158,6 +158,8 @@ class Lowering:
             ir_node = self._lower_linear(fx_node, module)
         elif isinstance(module, torch.nn.ReLU):
             ir_node = self._lower_relu(fx_node, module)
+        elif isinstance(module, torch.nn.GELU):
+            ir_node = self._lower_gelu(fx_node, module)
         elif isinstance(module, torch.nn.BatchNorm2d):
             ir_node = self._lower_batchnorm2d(fx_node, module)
         elif isinstance(module, torch.nn.BatchNorm1d):
@@ -368,6 +370,20 @@ class Lowering:
         ir_node = IRNode(
             name=fx_node.name,
             op_type='relu',
+            dtype='float32',
+            metadata={}
+        )
+        return ir_node
+    
+    def _lower_gelu(
+        self,
+        fx_node: fx.Node,
+        module: torch.nn.GELU
+    ) -> IRNode:
+        """Lower a GELU activation."""
+        ir_node = IRNode(
+            name=fx_node.name,
+            op_type='gelu',
             dtype='float32',
             metadata={}
         )

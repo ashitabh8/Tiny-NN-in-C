@@ -13,6 +13,15 @@ import numpy as np
 
 from ..ir.graph import IRGraph
 from ..ir.node import IRNode
+from .memory_planner import (
+    assign_buffer_slots,
+    calculate_buffer_sizes,
+    compute_buffer_last_use,
+    node_has_buffer,
+)
+from .naming import sanitize_name
+from .backend_registry import check_backend
+from .parallel_regions import ParallelRegion, find_parallel_regions
 
 try:
     from ..profiling.ops.profiling_utils import ProfilingWrapperNode
@@ -61,6 +70,7 @@ class CPrinter:
                          Defaults to os.path.basename(output_dir).
         """
         os.makedirs(output_dir, exist_ok=True)
+        check_backend("c")
         if sketch_name is None:
             sketch_name = os.path.basename(os.path.abspath(output_dir))
 
@@ -105,7 +115,7 @@ class CPrinter:
         c_ops_dir = project_root / "src" / "c_ops"
         
         # List of headers to copy
-        headers = ["nn_ops_float.h", "nn_ops_int8.h", "nn_ops_int16.h"]
+        headers = ["nn_ops_float.h", "nn_ops_int8.h", "nn_ops_int16.h", "nn_ops_int4.h"]
         
         for header in headers:
             src = c_ops_dir / header
@@ -154,7 +164,7 @@ class CPrinter:
                 format_func = lambda v: f"{float(v):.8f}f"
             
             # Generate C array
-            c_name = self._sanitize_name(param_name)
+            c_name = sanitize_name(param_name)
             lines.append(f"// Shape: {param_data.shape}, dtype: {param_data.dtype}")
             lines.append(f"static const {c_type} {c_name}[{len(flat_data)}] = {{")
             
@@ -355,6 +365,19 @@ class CPrinter:
             dtype: The dtype to check for ('int8', 'int16', etc.)
         """
         return any(node.dtype == dtype for node in self.ir_graph.nodes)
+
+    def _needs_compression_header(self) -> bool:
+        """True if graph uses int4 or palettization weight-only kernels."""
+        for node in self.ir_graph.nodes:
+            qp = node.metadata.get("quant_params", {}) if node.metadata else {}
+            strat = qp.get("strategy", "")
+            if strat in (
+                "static_int4_per_group",
+                "dynamic_int4_per_group",
+                "palettization",
+            ):
+                return True
+        return False
     
     def _get_buffer_dtype(self, node: IRNode) -> str:
         """
@@ -376,105 +399,13 @@ class CPrinter:
         return "sizeof(float)"
     
     def _has_buffer(self, node: IRNode) -> bool:
-        """True if this node produces an output buffer (not input or method_size)."""
-        shape_only_ops = {'method_size', 'method_getattr', 'method_getitem'}
-        if node.op_type in shape_only_ops:
-            return False
-        if node.op_type == 'mul' and node.output_shape is None:
-            # FX shape arithmetic (e.g., C * S for reshape args) has no tensor buffer.
-            return False
-        return node.op_type != 'input'
+        return node_has_buffer(node)
 
     def _has_profiling_nodes(self) -> bool:
         """True if the graph contains any ProfilingWrapperNode (needs time.h, stdio.h)."""
         if ProfilingWrapperNode is None:
             return False
         return any(isinstance(n, ProfilingWrapperNode) for n in self.ir_graph.nodes)
-
-    def _compute_buffer_last_use(self, order: List[IRNode]) -> Dict[str, IRNode]:
-        """
-        Compute for each buffer-producing node the last node (in execution order) that uses it.
-        Used to close blocks so buffers go out of scope after their last use (reduces peak memory).
-        """
-        last_use: Dict[str, IRNode] = {}
-        for node in order:
-            for inp in node.inputs:
-                last_use[inp.name] = node
-        return last_use
-
-    def _assign_buffer_slots(
-        self,
-        order: List[IRNode],
-        buffer_sizes: Dict[str, int],
-        last_use: Dict[str, IRNode],
-    ) -> Tuple[Dict[str, int], Dict[int, int], Dict[int, str], int]:
-        """
-        Assign each buffer-producing node to a reusable slot using interval graph coloring.
-        Relu nodes are skipped (they share their input's slot, in-place).
-        Returns (slot_assignments, slot_sizes, slot_dtypes, num_slots).
-        """
-        order_index = {n.name: i for i, n in enumerate(order)}
-
-        # last_use_idx: node_name -> index of last node that uses it
-        last_use_idx: Dict[str, int] = {}
-        for node in order:
-            if node.op_type in ('input', 'method_size'):
-                continue
-            if node.op_type == 'relu':
-                continue  # relu does not get its own slot
-            if not self._has_buffer(node):
-                continue
-            def_idx = order_index[node.name]
-            lu_node = last_use.get(node.name, node)
-            last_use_idx[node.name] = order_index[lu_node.name]
-
-        # Extend relu input's last_use_idx to when relu's output is last used
-        for node in order:
-            if node.op_type == 'relu' and node.inputs:
-                inp = node.inputs[0]
-                if inp.name not in last_use_idx:
-                    continue
-                lu_relu = last_use.get(node.name, node)
-                relu_last_idx = order_index[lu_relu.name]
-                last_use_idx[inp.name] = max(last_use_idx[inp.name], relu_last_idx)
-
-        # Build list of (node_name, def_idx, last_use_idx, size, c_dtype) for slot assignment
-        intervals: List[Tuple[str, int, int, int, str]] = []
-        for node in order:
-            if node.op_type in ('input', 'method_size', 'relu'):
-                continue
-            if not self._has_buffer(node):
-                continue
-            def_idx = order_index[node.name]
-            lu_idx = last_use_idx[node.name]
-            size = buffer_sizes.get(node.name, 1024)
-            c_dtype = self._get_buffer_dtype(node)
-            intervals.append((node.name, def_idx, lu_idx, size, c_dtype))
-
-        intervals.sort(key=lambda x: x[1])  # sort by def_idx
-
-        # Greedy interval coloring: assign to lowest free slot
-        slot_assignments: Dict[str, int] = {}
-        slot_last_use: Dict[int, int] = {}
-        slot_sizes: Dict[int, int] = {}
-        slot_dtypes: Dict[int, str] = {}
-
-        for node_name, def_idx, lu_idx, size, c_dtype in intervals:
-            found_slot = None
-            for slot_id in sorted(slot_last_use.keys()):
-                if slot_last_use[slot_id] < def_idx and slot_dtypes[slot_id] == c_dtype:
-                    found_slot = slot_id
-                    break
-            if found_slot is None:
-                found_slot = len(slot_last_use)
-                slot_last_use[found_slot] = -1
-                slot_dtypes[found_slot] = c_dtype
-            slot_assignments[node_name] = found_slot
-            slot_last_use[found_slot] = lu_idx
-            slot_sizes[found_slot] = max(slot_sizes.get(found_slot, 0), size)
-
-        num_slots = len(slot_sizes)
-        return slot_assignments, slot_sizes, slot_dtypes, num_slots
 
     def generate_model_c(self) -> str:
         """
@@ -509,6 +440,8 @@ class CPrinter:
             lines.append("#include \"nn_ops_int8.h\"")
         if self._has_nodes_with_dtype('int16'):
             lines.append("#include \"nn_ops_int16.h\"")
+        if self._needs_compression_header():
+            lines.append("#include \"nn_ops_int4.h\"")
         
         lines.append("")
         lines.append("#include <string.h>")
@@ -517,10 +450,15 @@ class CPrinter:
             lines.append("#include <stdio.h>")
         lines.append("")
         
-        buffer_sizes = self._calculate_buffer_sizes()
+        buffer_sizes = calculate_buffer_sizes(self.ir_graph)
         order = self.ir_graph.topological_sort()
-        last_use = self._compute_buffer_last_use(order)
-        slot_assignments, slot_sizes, slot_dtypes, num_slots = self._assign_buffer_slots(order, buffer_sizes, last_use)
+        last_use = compute_buffer_last_use(order)
+        slot_assignments, slot_sizes, slot_c_dtypes, num_slots = assign_buffer_slots(
+            order, buffer_sizes, last_use
+        )
+        slot_dtypes = {
+            sid: self._ir_dtype_to_c(slot_c_dtypes[sid]) for sid in slot_c_dtypes
+        }
         self._slot_assignments = slot_assignments
         output_node = self.ir_graph.outputs[0] if self.ir_graph.outputs else None
 
@@ -544,7 +482,26 @@ class CPrinter:
         if num_slots > 0:
             lines.append("")
 
+        # Parallel regions (LQER diamonds): the two chains are emitted as
+        # OpenMP sections. Without -fopenmp the pragmas are ignored and the
+        # sections run sequentially (identical numerics).
+        regions = find_parallel_regions(order)
+        region_of: Dict[str, ParallelRegion] = {}
+        for region in regions:
+            for region_node in region.main_chain + region.branch_chain:
+                region_of[region_node.name] = region
+        emitted_region_nodes = set()
+
         for node in order:
+            if node.name in emitted_region_nodes:
+                continue
+
+            region = region_of.get(node.name)
+            if region is not None:
+                lines.extend(self._generate_parallel_region(region, base_indent))
+                emitted_region_nodes.update(region.node_names)
+                continue
+
             if node.op_type in ('input', 'method_size'):
                 node_code = self._generate_node_code(node)
                 if node_code:
@@ -567,106 +524,48 @@ class CPrinter:
         lines.append("")
         return "\n".join(lines)
     
+    def _generate_parallel_region(self, region: ParallelRegion, base_indent: str) -> List[str]:
+        """
+        Emit a fan-out/fan-in diamond as two OpenMP sections.
+
+        The chains are topologically independent (both only consume the
+        shared source), so they may run concurrently. Buffer aliasing across
+        the region is prevented by the memory planner (see
+        memory_planner.assign_buffer_slots). Compile with -fopenmp to enable;
+        without it the pragmas are ignored and the code runs sequentially.
+        """
+        lines = []
+        label = region.join.metadata.get('lqer_corrected_layer', region.join.name)
+        lines.append(base_indent + f"// parallel region: quantized path || error-correction branch ('{label}')")
+        lines.append(base_indent + "#pragma omp parallel sections")
+        lines.append(base_indent + "{")
+
+        for chain, chain_label in (
+            (region.main_chain, "quantized path"),
+            (region.branch_chain, "correction branch"),
+        ):
+            lines.append(base_indent + "    #pragma omp section")
+            lines.append(base_indent + "    {")
+            for node in chain:
+                lines.append(base_indent + f"        // {node.name} [{node.op_type}] ({chain_label})")
+                for line in self._generate_node_code(node):
+                    lines.append(base_indent + "        " + line)
+            lines.append(base_indent + "    }")
+
+        lines.append(base_indent + "}")
+        return lines
+
     def _calculate_buffer_sizes(self) -> Dict[str, int]:
-        """
-        Calculate buffer sizes for each node using inferred shapes.
-        
-        Returns:
-            Dictionary mapping node name to buffer size (total number of elements)
-        """
-        sizes = {}
-        
-        for node in self.ir_graph.nodes:
-            if node.op_type == 'input':
-                continue
-            if not self._has_buffer(node):
-                continue  # scalar int, no buffer
+        return calculate_buffer_sizes(self.ir_graph)
 
-            # First priority: use inferred shape if available
-            if node.output_shape is not None:
-                # Calculate total number of elements from shape
-                import math
-                # Remove batch dimension (first dimension) if present
-                shape = node.output_shape
-                if len(shape) > 0 and shape[0] == 1:
-                    shape = shape[1:]  # Remove batch dimension
-                
-                if len(shape) > 0:
-                    size = math.prod(shape)
-                    sizes[node.name] = size
-                else:
-                    sizes[node.name] = 1  # Scalar
-                
-                continue
-            
-            # No output_shape: require operation-specific info; raise if missing
-            if node.op_type == 'linear':
-                if 'out_features' not in node.metadata:
-                    raise ValueError(f"{node.name} (linear): missing metadata 'out_features'; need shape inference or metadata")
-                sizes[node.name] = node.metadata['out_features']
-            elif node.op_type == 'conv2d':
-                raise ValueError(f"{node.name} (conv2d): missing output_shape; run with example_input for shape inference")
-            elif node.op_type == 'conv1d':
-                raise ValueError(f"{node.name} (conv1d): missing output_shape; run with example_input for shape inference")
-            elif node.op_type in ['relu', 'softmax', 'batchnorm', 'batchnorm1d']:
-                if not node.inputs:
-                    raise ValueError(f"{node.name} ({node.op_type}): no input node")
-                input_size = self._node_buffer_size(sizes, node.inputs[0])
-                if input_size is None:
-                    raise ValueError(f"{node.name} ({node.op_type}): input shape unknown; run with example_input for shape inference")
-                sizes[node.name] = input_size
-            elif node.op_type == 'adaptive_avg_pool':
-                if not node.inputs or not node.inputs[0].output_shape or len(node.inputs[0].output_shape) != 4:
-                    raise ValueError(f"{node.name} (adaptive_avg_pool): need input with 4D shape [B,C,H,W]; run with example_input for shape inference")
-                sizes[node.name] = node.inputs[0].output_shape[1]
-            elif node.op_type in (
-                'method_view',
-                'method_flatten',
-                'method_reshape',
-                'method_unsqueeze',
-                'method_squeeze',
-                'method_permute',
-            ):
-                if not node.inputs:
-                    raise ValueError(f"{node.name} ({node.op_type}): no input node")
-                input_size = self._node_buffer_size(sizes, node.inputs[0])
-                if input_size is None:
-                    raise ValueError(f"{node.name} ({node.op_type}): input shape unknown; run with example_input for shape inference")
-                sizes[node.name] = input_size
-            elif node.op_type in ('method_getattr', 'method_getitem'):
-                continue
-            elif node.op_type == 'mul':
-                if node.output_shape is None:
-                    continue
-                if not node.inputs:
-                    raise ValueError(f"{node.name} (mul): no input node")
-                input_size = self._node_buffer_size(sizes, node.inputs[0])
-                if input_size is None:
-                    raise ValueError(f"{node.name} (mul): input shape unknown; run with example_input for shape inference")
-                sizes[node.name] = input_size
-            else:
-                raise ValueError(f"{node.name}: unknown op_type '{node.op_type}' and no output_shape; run with example_input for shape inference")
-        
-        return sizes
+    @staticmethod
+    def _ir_dtype_to_c(dtype: str) -> str:
+        if dtype == "int8":
+            return "int8_t"
+        if dtype == "int16":
+            return "int16_t"
+        return "float"
 
-    def _node_buffer_size(self, sizes: Dict[str, int], node: IRNode) -> Optional[int]:
-        """Return buffer size for a node from sizes dict or output_shape. None if unknown."""
-        if node.name in sizes:
-            return sizes[node.name]
-        if node.op_type == 'input' and node.output_shape is not None:
-            import math
-            shape = node.output_shape
-            if len(shape) > 0 and shape[0] == 1:
-                shape = shape[1:]
-            return math.prod(shape) if shape else 1
-        if node.output_shape is not None:
-            import math
-            shape = node.output_shape
-            if len(shape) > 0 and shape[0] == 1:
-                shape = shape[1:]
-            return math.prod(shape) if shape else 1
-        return None
-    
     def _generate_node_code(self, node: IRNode) -> List[str]:
         """
         Generate C code for a single IR node.
@@ -704,6 +603,9 @@ class CPrinter:
 
         elif node.op_type == 'relu':
             return self._generate_relu(node)
+
+        elif node.op_type == 'gelu':
+            return self._generate_gelu(node)
 
         elif node.op_type == 'batchnorm':
             return self._generate_batchnorm(node)
@@ -755,8 +657,8 @@ class CPrinter:
         
         input_buffer = self._get_input_buffer(node, 0)
         output_buffer = self._get_buffer_name(node)
-        weight_name = self._sanitize_name(node.metadata['weight_name'])
-        bias_name = self._sanitize_name(node.metadata['bias_name']) if node.metadata.get('bias_name') else 'NULL'
+        weight_name = sanitize_name(node.metadata['weight_name'])
+        bias_name = sanitize_name(node.metadata['bias_name']) if node.metadata.get('bias_name') else 'NULL'
         
         # Extract parameters
         kernel_size = node.metadata['kernel_size']
@@ -809,8 +711,8 @@ class CPrinter:
 
         input_buffer = self._get_input_buffer(node, 0)
         output_buffer = self._get_buffer_name(node)
-        weight_name = self._sanitize_name(node.metadata['weight_name'])
-        bias_name = self._sanitize_name(node.metadata['bias_name']) if node.metadata.get('bias_name') else 'NULL'
+        weight_name = sanitize_name(node.metadata['weight_name'])
+        bias_name = sanitize_name(node.metadata['bias_name']) if node.metadata.get('bias_name') else 'NULL'
 
         kernel_size = node.metadata['kernel_size']
         stride = node.metadata['stride']
@@ -858,8 +760,8 @@ class CPrinter:
         
         input_buffer = self._get_input_buffer(node, 0)
         output_buffer = self._get_buffer_name(node)
-        weight_name = self._sanitize_name(node.metadata['weight_name'])
-        bias_name = self._sanitize_name(node.metadata['bias_name']) if node.metadata.get('bias_name') else 'NULL'
+        weight_name = sanitize_name(node.metadata['weight_name'])
+        bias_name = sanitize_name(node.metadata['bias_name']) if node.metadata.get('bias_name') else 'NULL'
         
         in_features = node.metadata['in_features']
         out_features = node.metadata['out_features']
@@ -897,16 +799,23 @@ class CPrinter:
         size = buffer_sizes.get(node.name, 1024)
         return [f"relu({input_buffer}, {size});"]
     
+    def _generate_gelu(self, node: IRNode) -> List[str]:
+        """Generate code for GELU operation (in-place, no memcpy)."""
+        input_buffer = self._get_input_buffer(node, 0)
+        buffer_sizes = self._calculate_buffer_sizes()
+        size = buffer_sizes.get(node.name, 1024)
+        return [f"gelu({input_buffer}, {size});"]
+    
     def _generate_batchnorm(self, node: IRNode) -> List[str]:
         """Generate code for BatchNorm operation."""
         lines = []
         
         input_buffer = self._get_input_buffer(node, 0)
         output_buffer = self._get_buffer_name(node)
-        gamma_name = self._sanitize_name(node.metadata['gamma_name'])
-        beta_name = self._sanitize_name(node.metadata['beta_name'])
-        mean_name = self._sanitize_name(node.metadata['mean_name'])
-        var_name = self._sanitize_name(node.metadata['var_name'])
+        gamma_name = sanitize_name(node.metadata['gamma_name'])
+        beta_name = sanitize_name(node.metadata['beta_name'])
+        mean_name = sanitize_name(node.metadata['mean_name'])
+        var_name = sanitize_name(node.metadata['var_name'])
         eps = node.metadata['eps']
         num_features = node.metadata['num_features']
         
@@ -932,10 +841,10 @@ class CPrinter:
 
         input_buffer = self._get_input_buffer(node, 0)
         output_buffer = self._get_buffer_name(node)
-        gamma_name = self._sanitize_name(node.metadata['gamma_name'])
-        beta_name = self._sanitize_name(node.metadata['beta_name'])
-        mean_name = self._sanitize_name(node.metadata['mean_name'])
-        var_name = self._sanitize_name(node.metadata['var_name'])
+        gamma_name = sanitize_name(node.metadata['gamma_name'])
+        beta_name = sanitize_name(node.metadata['beta_name'])
+        mean_name = sanitize_name(node.metadata['mean_name'])
+        var_name = sanitize_name(node.metadata['var_name'])
         eps = node.metadata['eps']
         num_features = node.metadata['num_features']
 
@@ -1035,6 +944,15 @@ class CPrinter:
             # Handle mean over the last dim, e.g. [B, C, I] -> [B, C]
             if isinstance(dim, int) and dim == -1 and len(shape_no_batch) == 2:
                 rows, cols = shape_no_batch
+                # Temporal stack output is stored NHWC [1, I=7, C]; average over time.
+                if rows == 7 or cols == 7:
+                    n_time = 7
+                    n_chan = cols if rows == 7 else rows
+                    lines.append("/* Mean over last dimension (NCL -> NLC in C) */")
+                    lines.append(
+                        f"mean_hwc({input_buffer}, 1, {n_time}, {n_chan}, {output_buffer});"
+                    )
+                    return lines
                 lines.append("/* Mean over last dimension */")
                 if node.dtype == "int8":
                     input_scale = node.metadata.get("input_scale", 1.0)
@@ -1198,6 +1116,21 @@ class CPrinter:
         if len(perm_args) == 1 and isinstance(perm_args[0], (tuple, list)):
             perm_args = list(perm_args[0])
 
+        # permute(0,2,1) on [B,I,C] row-major matches NHWC [1,I,C]; no reorder needed.
+        if (
+            perm_args == [0, 2, 1]
+            and len(raw_shape) == 3
+            and raw_shape[0] == 1
+        ):
+            size = raw_shape[1] * raw_shape[2]
+            lines.append(
+                "/* permute(0,2,1) after linear: row-major == NLC, memcpy */"
+            )
+            lines.append(
+                f"memcpy({output_buffer}, {input_buffer}, {size} * sizeof(float));"
+            )
+            return lines
+
         # Special-case NCHW->(B,H,C,W) when source buffer is NHWC from conv/bn/relu.
         if len(raw_shape) == 4 and raw_shape[0] == 1 and perm_args == [0, 2, 1, 3]:
             c = raw_shape[1]
@@ -1265,11 +1198,11 @@ class CPrinter:
         slots = slot_assignments if slot_assignments is not None else getattr(self, '_slot_assignments', None)
         if slots is not None:
             # Relu shares its input's slot (in-place); relu nodes are not in slot_assignments
-            if node.op_type == 'relu' and node.inputs:
+            if node.op_type in ('relu', 'gelu') and node.inputs:
                 return f"slot_{slots[node.inputs[0].name]}"
             if node.name in slots:
                 return f"slot_{slots[node.name]}"
-        return f"buf_{self._sanitize_name(node.name)}"
+        return f"buf_{sanitize_name(node.name)}"
     
     def _get_input_buffer(self, node: IRNode, input_idx: int) -> str:
         """Get the buffer name for a node's input."""
@@ -1278,15 +1211,11 @@ class CPrinter:
         
         input_node = node.inputs[input_idx]
         return self._get_buffer_name(input_node)
-    
+
+
     def _sanitize_name(self, name: str) -> str:
-        """Sanitize a name to be a valid C identifier."""
-        # Replace invalid characters with underscore
-        sanitized = name.replace('.', '_').replace('-', '_').replace(' ', '_')
-        # Ensure it starts with a letter or underscore
-        if sanitized and sanitized[0].isdigit():
-            sanitized = '_' + sanitized
-        return sanitized
+        """Backward-compatible alias for sanitize_name()."""
+        return sanitize_name(name)
 
 
 def generate_c_code(ir_graph: IRGraph, output_dir: str) -> None:

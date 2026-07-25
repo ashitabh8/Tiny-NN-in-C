@@ -18,9 +18,11 @@ Usage:
 
 from .base import IRPass
 from .fuse_dequant_quant import FuseDequantQuantPass
+from .structured_prune import PruneRule, StructuredPruningPass
 
 __all__ = [
     'IRPass',
     'FuseDequantQuantPass',
+    'PruneRule',
+    'StructuredPruningPass',
 ]
-

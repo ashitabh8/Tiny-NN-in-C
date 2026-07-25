@@ -7,7 +7,7 @@ from typing import Optional
 
 from .frontend.fx_tracer import FXTracer
 from .lowering.lower import Lowering
-from .codegen.c_printer import CPrinter
+from .codegen.backend_registry import create_printer
 from .ir.graph import IRGraph
 
 
@@ -37,7 +37,8 @@ class PyTorchToCCompiler:
         model: torch.nn.Module,
         example_input: torch.Tensor,
         output_dir: Optional[str] = "generated",
-        return_ir_only: bool = False
+        return_ir_only: bool = False,
+        backend: str = "c",
     ) -> IRGraph:
         """
         Compile a PyTorch model to C code.
@@ -94,13 +95,17 @@ class PyTorchToCCompiler:
             return ir_graph
         
         # Step 3: Code Generation
-        self._log("\n[3/3] Generating C code...")
-        printer = CPrinter(ir_graph)
+        self._log("\n[3/3] Generating code...")
+        printer = create_printer(backend, ir_graph)
         printer.generate_all(output_dir)
         self._log(f"  ✓ Generated files in: {output_dir}/")
-        self._log(f"    - model.h")
-        self._log(f"    - model.c")
-        self._log(f"    - weights.h")
+        if backend == "c":
+            self._log(f"    - model.h")
+            self._log(f"    - model.c")
+            self._log(f"    - weights.h")
+        elif backend == "triton":
+            self._log(f"    - model.py")
+            self._log(f"    - weights.npz")
         
         # Summary
         self._log("\n" + "=" * 60)
@@ -127,7 +132,8 @@ def compile_model(
     example_input: torch.Tensor,
     output_dir: Optional[str] = "generated",
     verbose: bool = True,
-    return_ir: bool = False
+    return_ir: bool = False,
+    backend: str = "c",
 ) -> IRGraph:
     """
     Convenience function to compile a PyTorch model to C.
@@ -138,6 +144,7 @@ def compile_model(
         output_dir: Directory to write generated C files to (None to skip)
         verbose: If True, print compilation progress
         return_ir: If True, only return IR graph (skip code generation)
+        backend: Code generator backend ('c' or 'triton')
         
     Returns:
         The IR graph
@@ -151,5 +158,7 @@ def compile_model(
         >>> ir_graph = compile_model(model, example_input, return_ir=True)
     """
     compiler = PyTorchToCCompiler(verbose=verbose and not return_ir)
-    return compiler.compile(model, example_input, output_dir, return_ir_only=return_ir)
+    return compiler.compile(
+        model, example_input, output_dir, return_ir_only=return_ir, backend=backend
+    )
 
