@@ -168,7 +168,7 @@ class TestPrePostDerivation:
         orig.metadata["out_features"] = 16
         node = QuantLinearNode(orig, cfg, input_scale=0.05, weight_scale=0.02, output_scale=0.05)
         lines = node.generate_c_code(_P())
-        assert lines[0].startswith("dense_int8(")
+        assert lines[0].startswith("dense_affine_int8(")
         tlines = node.generate_triton_code(_P())
         assert tlines[0].startswith("ops_q.dense_int8(")
 

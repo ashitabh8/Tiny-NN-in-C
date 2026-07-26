@@ -28,12 +28,17 @@ static inline int8_t unpack_int4_at(const int8_t* packed_w, int flat) {
                       : unpack_int4_low(packed_w[byte_idx]);
 }
 
-/**
- * Dense: int8 activations + packed int4 weights (per-group scales) -> int8.
- * packed_w: int8 array with 2 int4 weights per byte (layout matches float int4 packing).
- * weight_scales layout: [num_groups * out_features], index g*out_features + o.
- */
-static inline void dense_int8_int4w_per_group(
+/* Phase 3 unified affine dense — int8 act + packed int4 weights. */
+NN_DENSE_AFFINE_DEFINE_ZP(
+    dense_affine_int8_w4_core,
+    int8_t, int8_t, NN_LOAD_W_INT4, int8_t, NN_STORE_INT8)
+
+NN_DENSE_AFFINE_DEFINE_TO_FLOAT(
+    dense_affine_int8_w4_to_float_core,
+    int8_t, int8_t, NN_LOAD_W_INT4)
+
+/* Public API keeps packed weight_count (unused; matches prior codegen). */
+static inline void dense_affine_int8_w4(
     const int8_t* x,
     int in_features,
     const int8_t* packed_w,
@@ -41,49 +46,25 @@ static inline void dense_int8_int4w_per_group(
     const float* b,
     int out_features,
     int group_size,
+    int per_out_column,
     float input_scale,
     const float* weight_scales,
     float output_scale,
     int input_zp,
     int weight_zp,
     int output_zp,
+    int a_symmetric,
+    int w_symmetric,
     int8_t* y)
 {
     (void)weight_count;
-    int num_groups = in_features / group_size;
-    for (int o = 0; o < out_features; ++o) {
-        float result = 0.0f;
-        for (int g = 0; g < num_groups; ++g) {
-            int64_t acc = 0;
-            int64_t sum_qx = 0;
-            int64_t sum_qw = 0;
-            int base = g * group_size;
-            for (int i = 0; i < group_size; ++i) {
-                int idx = base + i;
-                int flat = idx * out_features + o;
-                int64_t wv = (int64_t)unpack_int4_at(packed_w, flat);
-                acc += (int64_t)x[idx] * wv;
-                sum_qx += (int64_t)x[idx];
-                sum_qw += wv;
-            }
-            int64_t zp_term = (int64_t)input_zp * (int64_t)weight_zp * (int64_t)group_size;
-            int64_t dot_affine = acc - (int64_t)weight_zp * sum_qx
-                                 - (int64_t)input_zp * sum_qw + zp_term;
-            result += (float)dot_affine * input_scale
-                      * weight_scales[g * out_features + o];
-        }
-        if (b != NULL) {
-            result += b[o];
-        }
-        y[o] = quantize_scalar_int8(result, output_scale, output_zp);
-    }
+    dense_affine_int8_w4_core(
+        x, in_features, packed_w, b, out_features, group_size, per_out_column,
+        input_scale, weight_scales, output_scale, input_zp, weight_zp, output_zp,
+        a_symmetric, w_symmetric, y);
 }
 
-/**
- * Dense: int8 activations + packed int4 weights (per-group scales) -> float32.
- * Used by dynamic quantization (symmetric, weight_zp assumed 0).
- */
-static inline void dense_int8_int4w_per_group_to_float(
+static inline void dense_affine_int8_w4_to_float(
     const int8_t* x,
     int in_features,
     const int8_t* packed_w,
@@ -91,31 +72,15 @@ static inline void dense_int8_int4w_per_group_to_float(
     const float* b,
     int out_features,
     int group_size,
+    int per_out_column,
     float input_scale,
     const float* weight_scales,
     float* y)
 {
     (void)weight_count;
-    int num_groups = in_features / group_size;
-    for (int o = 0; o < out_features; ++o) {
-        float result = 0.0f;
-        for (int g = 0; g < num_groups; ++g) {
-            int64_t acc = 0;
-            int base = g * group_size;
-            for (int i = 0; i < group_size; ++i) {
-                int idx = base + i;
-                int flat = idx * out_features + o;
-                int64_t wv = (int64_t)unpack_int4_at(packed_w, flat);
-                acc += (int64_t)x[idx] * wv;
-            }
-            result += (float)acc * input_scale
-                      * weight_scales[g * out_features + o];
-        }
-        if (b != NULL) {
-            result += b[o];
-        }
-        y[o] = result;
-    }
+    dense_affine_int8_w4_to_float_core(
+        x, in_features, packed_w, b, out_features, group_size, per_out_column,
+        input_scale, weight_scales, y);
 }
 
 static inline void dense_float_palettized(

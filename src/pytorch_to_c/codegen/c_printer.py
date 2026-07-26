@@ -115,7 +115,13 @@ class CPrinter:
         c_ops_dir = project_root / "src" / "c_ops"
         
         # List of headers to copy
-        headers = ["nn_ops_float.h", "nn_ops_int8.h", "nn_ops_int16.h", "nn_ops_int4.h"]
+        headers = [
+            "nn_ops_float.h",
+            "nn_ops_affine_dense.h",
+            "nn_ops_int8.h",
+            "nn_ops_int16.h",
+            "nn_ops_int4.h",
+        ]
         
         for header in headers:
             src = c_ops_dir / header

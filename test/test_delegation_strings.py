@@ -1,6 +1,7 @@
-"""Phase 2 primary gate: byte-identical kernel call strings.
+"""Phase 2/3 delegation strings.
 
-Frozen against pre-Phase-2 specialized nodes (captured 2026-07-10).
+Phase 3 intentionally changed GOLDEN_C to the unified affine template calls.
+GOLDEN_TRITON remains the Phase-2 specialized names (Phase 4 will retarget).
 """
 
 import os
@@ -39,42 +40,44 @@ class MockPrinter:
 
 GOLDEN_C = {
     "w8a8_static_per_tensor": [
-        "dense_int8(buf_x, 32, fc1_weight, fc1_bias, 16, 0.05f, 0.02f, 0.05f, 0, 0, 0, buf_y);"
+        "dense_affine_int8(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 0, 0.05f, "
+        "(const float[]){ 0.02f }, 0.05f, 0, 0, 0, 1, 1, buf_y);"
     ],
     "w16a16_static_per_tensor": [
-        "dense_int16(buf_x, 32, fc1_weight, fc1_bias, 16, 0.005f, 0.002f, 0.005f, 0, 0, 0, buf_y);"
+        "dense_affine_int16(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 0, 0.005f, "
+        "(const float[]){ 0.002f }, 0.005f, 0, 0, 0, 1, 1, buf_y);"
     ],
     "w8a8_static_per_channel": [
-        "dense_int8_per_channel(buf_x, 32, fc1_weight, fc1_bias, 16, 0.05f, "
-        "fc1_weight_per_channel_scales, 0.05f, 0, 0, 0, buf_y);"
+        "dense_affine_int8(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 1, 0.05f, "
+        "fc1_weight_per_channel_scales, 0.05f, 0, 0, 0, 1, 1, buf_y);"
     ],
     "w16a16_static_per_channel": [
-        "dense_int16_per_channel(buf_x, 32, fc1_weight, fc1_bias, 16, 0.005f, "
-        "fc1_weight_per_channel_scales, 0.005f, 0, 0, 0, buf_y);"
+        "dense_affine_int16(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 1, 0.005f, "
+        "fc1_weight_per_channel_scales, 0.005f, 0, 0, 0, 1, 1, buf_y);"
     ],
     "w8a8_static_per_group": [
-        "dense_int8_per_group(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 0.05f, "
-        "fc1_weight_per_group_scales, 0.05f, 0, 0, 0, buf_y);"
+        "dense_affine_int8(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 1, 0.05f, "
+        "fc1_weight_per_group_scales, 0.05f, 0, 0, 0, 1, 1, buf_y);"
     ],
     "w16a16_static_per_group": [
-        "dense_int16_per_group(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 0.005f, "
-        "fc1_weight_per_group_scales, 0.005f, 0, 0, 0, buf_y);"
+        "dense_affine_int16(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 1, 0.005f, "
+        "fc1_weight_per_group_scales, 0.005f, 0, 0, 0, 1, 1, buf_y);"
     ],
     "w8a8_dynamic": [
-        "dense_int8_to_float(buf_x, 32, fc1_weight, fc1_bias, 16, "
-        "scale_fc1_input_dynq, 0.02f, buf_y);"
+        "dense_affine_int8_to_float(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 0, "
+        "scale_fc1_input_dynq, (const float[]){ 0.02f }, buf_y);"
     ],
     "w16a16_dynamic": [
-        "dense_int16_to_float(buf_x, 32, fc1_weight, fc1_bias, 16, "
-        "scale_fc1_input_dynq, 0.002f, buf_y);"
+        "dense_affine_int16_to_float(buf_x, 32, fc1_weight, fc1_bias, 16, 32, 0, "
+        "scale_fc1_input_dynq, (const float[]){ 0.002f }, buf_y);"
     ],
     "w4a8_static": [
-        "dense_int8_int4w_per_group(buf_x, 32, fc1_weight, 512, fc1_bias, 16, 32, "
-        "0.05f, fc1_weight_per_group_scales, 0.05f, 0, 0, 0, buf_y);"
+        "dense_affine_int8_w4(buf_x, 32, fc1_weight, 512, fc1_bias, 16, 32, 1, "
+        "0.05f, fc1_weight_per_group_scales, 0.05f, 0, 0, 0, 1, 1, buf_y);"
     ],
     "w4a8_dynamic": [
-        "dense_int8_int4w_per_group_to_float(buf_x, 32, fc1_weight, 512, fc1_bias, "
-        "16, 32, scale_fc1_input_dynq, fc1_weight_per_group_scales, buf_y);"
+        "dense_affine_int8_w4_to_float(buf_x, 32, fc1_weight, 512, fc1_bias, 16, "
+        "32, 1, scale_fc1_input_dynq, fc1_weight_per_group_scales, buf_y);"
     ],
 }
 

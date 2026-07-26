@@ -9,7 +9,9 @@
 #define NN_OPS_INT16_H_
 
 #include <stdint.h>
+#include <stddef.h>
 #include <math.h>
+#include "nn_ops_affine_dense.h"
 
 /* ==========================================================================
  * Quantization/Dequantization Utilities
@@ -92,143 +94,16 @@ static inline void dequantize_int16_to_float(
 }
 
 /* ==========================================================================
- * Dense/Linear Layer (int16)
+ * Dense/Linear Layer (int16) — Phase 3 unified affine template
  * ========================================================================== */
 
-/**
- * Quantized dense (linear) layer - int16 (affine zero-points, same math as int8).
- *
- * @param input_zp      Activation zero point
- * @param weight_zp     Weight zero point
- * @param output_zp     Layer output zero point
- */
-static inline void dense_int16(
-    const int16_t* x,
-    int in_features,
-    const int16_t* W,
-    const float* bias,
-    int out_features,
-    float input_scale,
-    float weight_scale,
-    float output_scale,
-    int input_zp,
-    int weight_zp,
-    int output_zp,
-    int16_t* y)
-{
-    int64_t sum_qx = 0;
-    for (int i = 0; i < in_features; ++i) {
-        sum_qx += (int64_t)x[i];
-    }
-    int64_t zx = (int64_t)input_zp;
-    int64_t zw = (int64_t)weight_zp;
-    int64_t zp_term = zx * zw * (int64_t)in_features;
+NN_DENSE_AFFINE_DEFINE_ZP(
+    dense_affine_int16,
+    int16_t, int16_t, NN_LOAD_W_DIRECT, int16_t, NN_STORE_INT16)
 
-    for (int o = 0; o < out_features; ++o) {
-        int64_t acc = 0;
-        int64_t sum_qw = 0;
-        for (int i = 0; i < in_features; ++i) {
-            int64_t wv = (int64_t)W[i * out_features + o];
-            acc += (int64_t)x[i] * wv;
-            sum_qw += wv;
-        }
-        int64_t dot_affine = acc - zw * sum_qx - zx * sum_qw + zp_term;
-        float result = (float)dot_affine * input_scale * weight_scale;
-
-        if (bias) {
-            result += bias[o];
-        }
-
-        y[o] = quantize_float_to_int16_scalar(result, output_scale, output_zp);
-    }
-}
-
-/**
- * Dense int16 — per-output-feature weight scales (columns of W).
- */
-static inline void dense_int16_per_channel(
-    const int16_t* x,
-    int in_features,
-    const int16_t* W,
-    const float* bias,
-    int out_features,
-    float input_scale,
-    const float* weight_scales,
-    float output_scale,
-    int input_zp,
-    int weight_zp,
-    int output_zp,
-    int16_t* y)
-{
-    int64_t sum_qx = 0;
-    for (int i = 0; i < in_features; ++i) {
-        sum_qx += (int64_t)x[i];
-    }
-    int64_t zx = (int64_t)input_zp;
-    int64_t zw = (int64_t)weight_zp;
-    int64_t zp_term = zx * zw * (int64_t)in_features;
-
-    for (int o = 0; o < out_features; ++o) {
-        int64_t acc = 0;
-        int64_t sum_qw = 0;
-        for (int i = 0; i < in_features; ++i) {
-            int64_t wv = (int64_t)W[i * out_features + o];
-            acc += (int64_t)x[i] * wv;
-            sum_qw += wv;
-        }
-        int64_t dot_affine = acc - zw * sum_qx - zx * sum_qw + zp_term;
-        float result = (float)dot_affine * input_scale * weight_scales[o];
-
-        if (bias) {
-            result += bias[o];
-        }
-
-        y[o] = quantize_float_to_int16_scalar(result, output_scale, output_zp);
-    }
-}
-
-static inline void dense_int16_per_group(
-    const int16_t* x,
-    int in_features,
-    const int16_t* W,
-    const float* bias,
-    int out_features,
-    int group_size,
-    float input_scale,
-    const float* weight_scales,
-    float output_scale,
-    int input_zp,
-    int weight_zp,
-    int output_zp,
-    int16_t* y)
-{
-    int num_groups = in_features / group_size;
-    for (int o = 0; o < out_features; ++o) {
-        float result = 0.0f;
-        for (int g = 0; g < num_groups; ++g) {
-            int64_t acc = 0;
-            int64_t sum_qx = 0;
-            int64_t sum_qw = 0;
-            int base = g * group_size;
-            for (int i = 0; i < group_size; ++i) {
-                int idx = base + i;
-                int64_t wv = (int64_t)W[idx * out_features + o];
-                acc += (int64_t)x[idx] * wv;
-                sum_qx += (int64_t)x[idx];
-                sum_qw += wv;
-            }
-            int64_t zp_term = (int64_t)input_zp * (int64_t)weight_zp * (int64_t)group_size;
-            int64_t dot_affine = acc - (int64_t)weight_zp * sum_qx
-                                 - (int64_t)input_zp * sum_qw + zp_term;
-            result += (float)dot_affine * input_scale
-                      * weight_scales[g * out_features + o];
-        }
-        if (bias) {
-            result += bias[o];
-        }
-        y[o] = quantize_float_to_int16_scalar(result, output_scale, output_zp);
-    }
-}
+NN_DENSE_AFFINE_DEFINE_TO_FLOAT(
+    dense_affine_int16_to_float,
+    int16_t, int16_t, NN_LOAD_W_DIRECT)
 
 /* ==========================================================================
  * ReLU Activation (int16)
@@ -426,30 +301,8 @@ static inline void conv2d_nhwc_int16_per_channel(
 
 /**
  * Dense layer: int16 weights + int16 activations -> float32 output
+ * (see dense_affine_int16_to_float — Phase 3 unified template).
  */
-static inline void dense_int16_to_float(
-    const int16_t* x,
-    int in_features,
-    const int16_t* W,
-    const float* bias,
-    int out_features,
-    float input_scale,
-    float weight_scale,
-    float* y)
-{
-    float combined_scale = input_scale * weight_scale;
-    for (int o = 0; o < out_features; ++o) {
-        int64_t acc = 0;
-        for (int i = 0; i < in_features; ++i) {
-            acc += (int64_t)x[i] * (int64_t)W[i * out_features + o];
-        }
-        float result = (float)acc * combined_scale;
-        if (bias) {
-            result += bias[o];
-        }
-        y[o] = result;
-    }
-}
 
 /**
  * Conv2D NHWC: int16 activations + int16 weights -> float32 (dynamic path).

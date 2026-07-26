@@ -169,6 +169,26 @@ class QuantLinearNode(QuantIRNode):
             and self.config.input_group_size < in_features
         )
 
+    def _c_scale_ptr_and_group(self, c_printer, in_features: int):
+        """Return (group_size, scales_c_expr) for the unified affine template."""
+        if self.metadata.get("per_group_weight_scales_param"):
+            scales = c_printer._sanitize_name(
+                self.metadata["per_group_weight_scales_param"]
+            )
+            g = self.metadata.get("group_size", self.resolved_group_size)
+            if g is None:
+                raise ValueError(
+                    f"QuantLinearNode '{self.name}': missing group_size metadata"
+                )
+            return int(g), scales
+        if self.metadata.get("per_channel_weight_scales_param"):
+            scales = c_printer._sanitize_name(
+                self.metadata["per_channel_weight_scales_param"]
+            )
+            return int(in_features), scales
+        # Per-tensor / dynamic scalar weight scale as a one-element compound literal.
+        return int(in_features), f"(const float[]){{ {self.weight_scale}f }}"
+
     def generate_c_code(self, c_printer) -> List[str]:
         cfg = self.config
         input_buffer = c_printer._get_input_buffer(self, 0)
@@ -181,71 +201,47 @@ class QuantLinearNode(QuantIRNode):
         )
         in_features = self.metadata["in_features"]
         out_features = self.metadata["out_features"]
+        per_out = 1 if cfg.per_out_column else 0
+        a_sym = 1 if cfg.a_symmetric else 0
+        w_sym = 1 if cfg.w_symmetric else 0
 
         if cfg.w_bits == 4:
-            return self._c_int4(c_printer, input_buffer, output_buffer,
-                                weight_name, bias_name, in_features, out_features)
+            return self._c_int4(
+                c_printer, input_buffer, output_buffer,
+                weight_name, bias_name, in_features, out_features,
+                per_out, a_sym, w_sym,
+            )
 
         bits = cfg.a_bits
+        group_size, scales_c = self._c_scale_ptr_and_group(c_printer, in_features)
+
         if cfg.dynamic_act:
             input_scale_var = self._get_input_scale_variable(c_printer)
-            fn = f"dense_int{bits}_to_float"
+            fn = f"dense_affine_int{bits}_to_float"
             return [
                 f"{fn}("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {bias_name}, {out_features}, "
-                f"{input_scale_var}, {self.weight_scale}f, "
+                f"{group_size}, {per_out}, {input_scale_var}, {scales_c}, "
                 f"{output_buffer});"
             ]
 
-        if not cfg.per_out_column:
-            fn = f"dense_int{bits}"
-            return [
-                f"{fn}("
-                f"{input_buffer}, {in_features}, "
-                f"{weight_name}, {bias_name}, {out_features}, "
-                f"{self.input_scale}f, {self.weight_scale}f, {self.output_scale}f, "
-                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
-                f"{output_buffer});"
-            ]
-
-        if self._is_per_group():
-            scales_param = self.metadata.get("per_group_weight_scales_param")
-            group_size = self.metadata.get("group_size")
-            if not scales_param or group_size is None:
-                raise ValueError(
-                    f"QuantLinearNode '{self.name}': missing group metadata"
-                )
-            scales_c = c_printer._sanitize_name(scales_param)
-            fn = f"dense_int{bits}_per_group"
-            return [
-                f"{fn}("
-                f"{input_buffer}, {in_features}, "
-                f"{weight_name}, {bias_name}, {out_features}, "
-                f"{group_size}, {self.input_scale}f, {scales_c}, {self.output_scale}f, "
-                f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
-                f"{output_buffer});"
-            ]
-
-        scales_param = self.metadata.get("per_channel_weight_scales_param")
-        if not scales_param:
-            raise ValueError(
-                f"QuantLinearNode '{self.name}': missing "
-                f"metadata['per_channel_weight_scales_param']"
-            )
-        scales_c = c_printer._sanitize_name(scales_param)
-        fn = f"dense_int{bits}_per_channel"
+        fn = f"dense_affine_int{bits}"
         return [
             f"{fn}("
             f"{input_buffer}, {in_features}, "
             f"{weight_name}, {bias_name}, {out_features}, "
-            f"{self.input_scale}f, {scales_c}, {self.output_scale}f, "
+            f"{group_size}, {per_out}, {self.input_scale}f, {scales_c}, "
+            f"{self.output_scale}f, "
             f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
-            f"{output_buffer});"
+            f"{a_sym}, {w_sym}, {output_buffer});"
         ]
 
-    def _c_int4(self, c_printer, input_buffer, output_buffer,
-                weight_name, bias_name, in_features, out_features) -> List[str]:
+    def _c_int4(
+        self, c_printer, input_buffer, output_buffer,
+        weight_name, bias_name, in_features, out_features,
+        per_out, a_sym, w_sym,
+    ) -> List[str]:
         scales_param = self.metadata.get("per_group_weight_scales_param")
         group_size = self.metadata.get("group_size", self.resolved_group_size)
         count = self.metadata.get("packed_weight_count")
@@ -257,19 +253,20 @@ class QuantLinearNode(QuantIRNode):
         if self.config.dynamic_act:
             input_scale_var = self._get_input_scale_variable(c_printer)
             return [
-                f"dense_int8_int4w_per_group_to_float("
+                f"dense_affine_int8_w4_to_float("
                 f"{input_buffer}, {in_features}, "
                 f"{weight_name}, {count}, {bias_name}, {out_features}, "
-                f"{group_size}, {input_scale_var}, {scales_c}, "
+                f"{group_size}, {per_out}, {input_scale_var}, {scales_c}, "
                 f"{output_buffer});"
             ]
         return [
-            f"dense_int8_int4w_per_group("
+            f"dense_affine_int8_w4("
             f"{input_buffer}, {in_features}, "
             f"{weight_name}, {count}, {bias_name}, {out_features}, "
-            f"{group_size}, {self.input_scale}f, {scales_c}, {self.output_scale}f, "
+            f"{group_size}, {per_out}, {self.input_scale}f, {scales_c}, "
+            f"{self.output_scale}f, "
             f"{self.input_offset}, {self.weight_offset}, {self.output_offset}, "
-            f"{output_buffer});"
+            f"{a_sym}, {w_sym}, {output_buffer});"
         ]
 
     def generate_triton_code(self, printer) -> List[str]:
